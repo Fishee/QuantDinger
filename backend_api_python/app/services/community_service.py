@@ -612,6 +612,29 @@ class CommunityService:
             data['bot_type'] = data['trading_config'].get('bot_type')
         return data
 
+    def _bot_preset_has_sync_update(
+        self,
+        local_strategy: Dict[str, Any],
+        preset_payload: Any,
+        preset_id: int,
+    ) -> bool:
+        """Return whether syncing would actually change a local bot strategy."""
+        preset = self._parse_bot_preset_json(preset_payload)
+        tc = dict(preset.get('trading_config') or {})
+        bot_type = preset.get('bot_type') or tc.get('bot_type')
+        if bot_type and not tc.get('bot_type'):
+            tc['bot_type'] = bot_type
+        tc['source_preset_id'] = int(preset_id)
+        tc['from_marketplace'] = True
+        local_tc = self._parse_trading_config_json(local_strategy.get('trading_config'))
+        merged_tc = {**local_tc, **tc}
+        new_code = preset.get('strategy_code') or local_strategy.get('strategy_code') or ''
+        return (
+            (local_strategy.get('strategy_code') or '') != new_code
+            or json.dumps(merged_tc, sort_keys=True, default=str)
+            != json.dumps(local_tc, sort_keys=True, default=str)
+        )
+
     def publish_bot_preset_from_strategy(
         self,
         *,
@@ -814,10 +837,11 @@ class CommunityService:
                                 original_row = cur.fetchone()
                                 original_code = original_row['code'] if original_row else None
                                 try:
-                                    local_preset = self._serialize_bot_preset_from_strategy(strat)
+                                    has_update = self._bot_preset_has_sync_update(
+                                        strat, original_code, indicator_id
+                                    )
                                 except Exception:
-                                    local_preset = strat.get('strategy_code') or ''
-                                has_update = (original_code or '') != (local_preset or '')
+                                    has_update = False
                         else:
                             local_copy = self._find_buyer_local_copy(
                                 cur, buyer_id=user_id, indicator_id=indicator_id,
@@ -1314,6 +1338,14 @@ class CommunityService:
                     except Exception:
                         cur.close()
                         return False, 'invalid_preset_payload', {}
+                    if not self._bot_preset_has_sync_update(
+                        local_strategy, original.get('code'), indicator_id
+                    ):
+                        cur.close()
+                        return True, 'already_latest', {
+                            'strategy_id': local_strategy['id'],
+                            'updated': False,
+                        }
                     tc = dict(preset.get('trading_config') or {})
                     bot_type = preset.get('bot_type') or tc.get('bot_type')
                     if bot_type and not tc.get('bot_type'):
@@ -1323,16 +1355,6 @@ class CommunityService:
                     local_tc = self._parse_trading_config_json(local_strategy.get('trading_config'))
                     merged_tc = {**local_tc, **tc}
                     new_code = preset.get('strategy_code') or local_strategy.get('strategy_code') or ''
-                    if (
-                        (local_strategy.get('strategy_code') or '') == new_code
-                        and json.dumps(merged_tc, sort_keys=True, default=str)
-                        == json.dumps(local_tc, sort_keys=True, default=str)
-                    ):
-                        cur.close()
-                        return True, 'already_latest', {
-                            'strategy_id': local_strategy['id'],
-                            'updated': False,
-                        }
                     cur.execute(
                         """
                         UPDATE qd_strategies_trading

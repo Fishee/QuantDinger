@@ -280,12 +280,29 @@ class LLMService:
             role = msg["role"]
             content = msg["content"]
             
+            parts = []
+            if isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        parts.append({"text": str(item.get("text") or "")})
+                    elif item.get("type") == "image_url":
+                        image_url = item.get("image_url") or {}
+                        data_url = image_url.get("url") if isinstance(image_url, dict) else None
+                        if data_url and data_url.startswith("data:image/") and ";base64," in data_url:
+                            header, b64 = data_url.split(",", 1)
+                            mime_type = header.replace("data:", "").split(";", 1)[0]
+                            parts.append({"inline_data": {"mime_type": mime_type, "data": b64}})
+            else:
+                parts.append({"text": str(content or "")})
+
             if role == "system":
-                system_instruction = content
+                system_instruction = str(content or "") if not isinstance(content, list) else ""
             elif role == "user":
-                contents.append({"role": "user", "parts": [{"text": content}]})
+                contents.append({"role": "user", "parts": parts or [{"text": ""}]})
             elif role == "assistant":
-                contents.append({"role": "model", "parts": [{"text": content}]})
+                contents.append({"role": "model", "parts": parts or [{"text": ""}]})
         
         data = {
             "contents": contents,
@@ -352,6 +369,56 @@ class LLMService:
             return content
         else:
             raise ValueError("LiteLLM response is missing 'choices'")
+
+    def _stream_openai_compatible(self, messages: list, model: str, temperature: float,
+                                  api_key: str, base_url: str, timeout: int):
+        """Stream text deltas from an OpenAI-compatible chat endpoint."""
+        url = f"{base_url}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if (api_key or "").strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
+        if "openrouter" in base_url:
+            headers["HTTP-Referer"] = "https://quantdinger.com"
+            headers["X-Title"] = "QuantDinger Analysis"
+
+        data = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=timeout, stream=True)
+        if response.status_code >= 400:
+            err_text = ""
+            try:
+                err = response.json().get("error")
+                err_text = err.get("message") if isinstance(err, dict) else str(err or "")
+            except Exception:
+                err_text = (response.text or "").strip()[:300]
+            raise ValueError(f"LLM API {response.status_code}: {err_text}".strip())
+
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if not raw_line:
+                continue
+            if isinstance(raw_line, bytes):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            else:
+                line = str(raw_line).strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line == "[DONE]":
+                break
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            choices = payload.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            content = delta.get("content")
+            if content:
+                yield content
 
     def _normalize_model_for_provider(self, model: str, provider: LLMProvider) -> str:
         """
@@ -594,6 +661,26 @@ class LLMService:
         
         logger.error(error_msg)
         raise Exception(error_msg)
+
+    def stream_llm_api(self, messages: list, model: str = None, temperature: float = 0.7):
+        """Stream LLM response deltas for providers with OpenAI-compatible streaming."""
+        p = self.provider
+        api_key = (self.get_api_key(p) or "").strip()
+        base_url = (self.get_base_url(p) or "").strip()
+        custom_ok_without_key = (p == LLMProvider.CUSTOM and bool(base_url))
+        if not api_key and not custom_ok_without_key:
+            raise ValueError(f"API key not configured for provider: {p.value}. Please set {p.value.upper()}_API_KEY in settings.")
+        if p == LLMProvider.GOOGLE:
+            yield self.call_llm_api(messages, model=model, temperature=temperature, use_json_mode=False)
+            return
+        if p == LLMProvider.LITELLM:
+            yield self.call_llm_api(messages, model=model, temperature=temperature, use_json_mode=False)
+            return
+
+        model = self._normalize_model_for_provider(model, p)
+        config = load_addon_config()
+        timeout = int(config.get(p.value, {}).get('timeout', 120))
+        yield from self._stream_openai_compatible(messages, model, temperature, api_key, base_url, timeout)
     
     def _try_alternative_providers(self, messages: list, model: str, temperature: float,
                                   use_json_mode: bool, excluded_provider: LLMProvider = None) -> str:

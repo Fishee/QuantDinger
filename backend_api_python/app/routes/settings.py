@@ -115,6 +115,8 @@ ADVANCED_KEYS = {
     'USDT_AMOUNT_SUFFIX_DECIMALS', 'USDT_WORKER_POLL_INTERVAL',
     # Adanos sentiment
     'ADANOS_SENTIMENT_SOURCE', 'ADANOS_API_BASE_URL',
+    # Provider internals / rarely changed endpoints
+    'TRADING_ECONOMICS_BASE_URL', 'TRADING_ECONOMICS_TIMEOUT',
     # Brand internals
     'BRAND_FAVICON_URL',
     'BRAND_LEGAL_USER_AGREEMENT_TEXT', 'BRAND_LEGAL_PRIVACY_POLICY_TEXT',
@@ -794,7 +796,48 @@ CONFIG_SCHEMA = {
                 'required': False,
                 'link': 'https://finnhub.io/register',
                 'link_text': 'settings.link.freeRegister',
-                'description': 'Finnhub API key for US stock data and economic calendar (free tier available)'
+                'description': 'Optional Finnhub API key for US stock quotes, company profile and news. Paid-only endpoints such as Economic Calendar are skipped by default.'
+            },
+            {
+                'key': 'FINNHUB_FREE_ONLY',
+                'label': 'Finnhub Free-only Mode',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'Keep enabled for free Finnhub plans. When enabled, paid-only Finnhub endpoints such as Economic Calendar and Social Sentiment are not called.'
+            },
+            {
+                'key': 'TRADING_ECONOMICS_CLIENT',
+                'label': 'Trading Economics Client',
+                'type': 'text',
+                'default': '',
+                'required': False,
+                'link': 'https://docs.tradingeconomics.com/',
+                'link_text': 'settings.link.viewDocs',
+                'description': 'Optional official international economic calendar provider. Leave empty to use the free AkShare/WallstreetCN fallback; enter your TE client name if you have a Trading Economics API key.'
+            },
+            {
+                'key': 'TRADING_ECONOMICS_KEY',
+                'label': 'Trading Economics Key',
+                'type': 'password',
+                'default': '',
+                'required': False,
+                'link': 'https://docs.tradingeconomics.com/',
+                'link_text': 'settings.link.viewDocs',
+                'description': 'Optional Trading Economics API key. The legacy guest account is discontinued; leave blank unless you have credentials.'
+            },
+            {
+                'key': 'TRADING_ECONOMICS_BASE_URL',
+                'label': 'Trading Economics Base URL',
+                'type': 'text',
+                'default': 'https://api.tradingeconomics.com',
+                'description': 'Trading Economics API endpoint. Change only if you use a proxy or mirror.'
+            },
+            {
+                'key': 'TRADING_ECONOMICS_TIMEOUT',
+                'label': 'Trading Economics Timeout (sec)',
+                'type': 'number',
+                'default': '10',
+                'description': 'Timeout for economic calendar requests.'
             },
             {
                 'key': 'COINGLASS_API_KEY',
@@ -1402,6 +1445,27 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '30',
                 'description': 'Credits per AI strategy/indicator code generation (higher token usage)'
+            },
+            {
+                'key': 'BILLING_COST_AI_COPILOT_CHAT',
+                'label': 'AI Copilot Chat Cost',
+                'type': 'number',
+                'default': '5',
+                'description': 'Credits per AI Copilot conversation turn'
+            },
+            {
+                'key': 'BILLING_COST_AI_COPILOT_IMAGE',
+                'label': 'AI Copilot Image Analysis Cost',
+                'type': 'number',
+                'default': '15',
+                'description': 'Extra credits charged when a Copilot message includes chart images'
+            },
+            {
+                'key': 'BILLING_COST_AI_COPILOT_RADAR',
+                'label': 'AI Copilot Radar Cost',
+                'type': 'number',
+                'default': '20',
+                'description': 'Credits per AI opportunity radar / market scan request'
             },
             {
                 'key': 'CREDITS_REGISTER_BONUS',

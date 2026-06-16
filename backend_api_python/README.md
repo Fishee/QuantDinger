@@ -248,6 +248,18 @@ The response normalizes common compare fields across sources, including
 `subreddit_count`, `unique_tweets`, `source_count`, `trade_count`,
 `market_count`, and `total_liquidity`.
 
+### Economic Calendar Data
+
+The global-market economic calendar is free-first. By default it uses the
+no-key AkShare/WallstreetCN calendar fallback. If you configure
+`TRADING_ECONOMICS_CLIENT` and `TRADING_ECONOMICS_KEY`, QuantDinger will try
+Trading Economics as the official international calendar provider before
+falling back. Finnhub paid-only calendar and social-sentiment endpoints are
+skipped by default through `FINNHUB_FREE_ONLY=true`.
+
+Only set `FINNHUB_FREE_ONLY=false` if your Finnhub plan explicitly includes
+those paid endpoints.
+
 ## AI analysis & memory
 
 Uses **FastAnalysisService** (single LLM call, multi-factor):

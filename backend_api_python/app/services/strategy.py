@@ -13,6 +13,16 @@ from app.services.exchange_execution import coalesce_exchange_config_from_payloa
 
 logger = get_logger(__name__)
 
+_strategy_service_singleton: Optional["StrategyService"] = None
+
+
+def get_strategy_service() -> "StrategyService":
+    """Return a shared strategy service for callers that use service factories."""
+    global _strategy_service_singleton
+    if _strategy_service_singleton is None:
+        _strategy_service_singleton = StrategyService()
+    return _strategy_service_singleton
+
 
 def _normalize_cross_sectional_symbol_list(
     symbol_list: List[Any],

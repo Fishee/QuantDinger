@@ -26,7 +26,7 @@ import requests
 from app.data_sources import DataSourceFactory
 from app.services.kline import KlineService
 from app.utils.logger import get_logger
-from app.config import APIKeys
+from app.config import APIKeys, FinnhubConfig
 
 logger = get_logger(__name__)
 
@@ -1918,7 +1918,7 @@ class MarketDataCollector:
                 logger.debug(f"Finnhub news fetch failed: {e}")
         
         # === 2) Finnhub 情绪分数 (美股社交媒体情绪) ===
-        if self._finnhub_client and market == 'USStock':
+        if self._finnhub_client and market == 'USStock' and not FinnhubConfig.FREE_ONLY:
             try:
                 social = self._finnhub_client.stock_social_sentiment(symbol)
                 if social:
@@ -1926,6 +1926,11 @@ class MarketDataCollector:
                     sentiment['twitter'] = social.get('twitter', {})
             except Exception as e:
                 logger.debug(f"Finnhub sentiment fetch failed: {e}")
+        elif self._finnhub_client and market == 'USStock':
+            sentiment['finnhub_social_skipped'] = {
+                'reason': 'FINNHUB_FREE_ONLY=true',
+                'message': 'Finnhub social sentiment is skipped in free-only mode.',
+            }
         
         # === 3) 搜索引擎补充 (如果新闻太少) ===
         if len(news_list) < 5:

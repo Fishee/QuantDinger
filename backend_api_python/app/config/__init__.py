@@ -8,6 +8,7 @@ from app.config.database import RedisConfig, CacheConfig
 from app.config.data_sources import (
     DataSourceConfig,
     FinnhubConfig,
+    TradingEconomicsConfig,
     TiingoConfig,
     YFinanceConfig,
     CCXTConfig,
@@ -28,6 +29,7 @@ __all__ = [
     # 数据源
     'DataSourceConfig',
     'FinnhubConfig',
+    'TradingEconomicsConfig',
     'TiingoConfig',
     'YFinanceConfig',
     'CCXTConfig',

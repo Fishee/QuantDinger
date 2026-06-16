@@ -33,12 +33,18 @@ DEFAULT_BILLING_CONFIG = {
     # ai_analysis 统一单价：即时分析 / AI过滤 / 定时任务 均按此单价 × 标的数扣费
     'cost_ai_analysis': 10,
     'cost_ai_code_gen': 30,
+    'cost_ai_copilot_chat': 5,
+    'cost_ai_copilot_image': 15,
+    'cost_ai_copilot_radar': 20,
 }
 
 # Feature name mapping (for log recording)
 FEATURE_NAMES = {
     'ai_analysis': 'AI Analysis',
     'ai_code_gen': 'AI Code Generation',
+    'ai_copilot_chat': 'AI Copilot Chat',
+    'ai_copilot_image': 'AI Copilot Image Analysis',
+    'ai_copilot_radar': 'AI Copilot Opportunity Radar',
 }
 
 
@@ -786,6 +792,9 @@ class BillingService:
             'feature_costs': {
                 'ai_analysis': config.get('cost_ai_analysis', 0),
                 'ai_code_gen': config.get('cost_ai_code_gen', 0),
+                'ai_copilot_chat': config.get('cost_ai_copilot_chat', 0),
+                'ai_copilot_image': config.get('cost_ai_copilot_image', 0),
+                'ai_copilot_radar': config.get('cost_ai_copilot_radar', 0),
             }
         }
 

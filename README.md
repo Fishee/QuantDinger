@@ -652,10 +652,12 @@ Use `backend_api_python/env.example` as the primary template. Key areas include:
 | Billing | `BILLING_ENABLED`, `BILLING_COST_AI_ANALYSIS` |
 | Membership | `MEMBERSHIP_MONTHLY_PRICE_USD`, `MEMBERSHIP_MONTHLY_CREDITS` |
 | USDT Payment | `USDT_PAY_ENABLED`, `USDT_TRC20_XPUB`, `TRONGRID_API_KEY` |
-| Optional data APIs | `TWELVE_DATA_API_KEY`, `FINNHUB_API_KEY`, `TIINGO_API_KEY`, `ADANOS_API_KEY` |
+| Optional data APIs | `TWELVE_DATA_API_KEY`, `FINNHUB_API_KEY`, `TIINGO_API_KEY`, `TRADING_ECONOMICS_CLIENT`, `TRADING_ECONOMICS_KEY`, `ADANOS_API_KEY` |
 | Proxy | `PROXY_URL` |
 | Workers | `ENABLE_PENDING_ORDER_WORKER`, `ENABLE_PORTFOLIO_MONITOR`, `ENABLE_REFLECTION_WORKER` |
 | AI tuning | `ENABLE_AI_ENSEMBLE`, `ENABLE_CONFIDENCE_CALIBRATION`, `AI_ENSEMBLE_MODELS` |
+
+Economic calendar data is free-first: QuantDinger uses the no-key AkShare/WallstreetCN calendar fallback by default, can use Trading Economics when credentials are configured, and keeps Finnhub paid-only calendar/social sentiment endpoints disabled unless `FINNHUB_FREE_ONLY=false`.
 
 ## Documentation
 

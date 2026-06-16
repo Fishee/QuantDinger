@@ -12,6 +12,7 @@ flat keys like `openrouter.api_key` become nested dicts like:
 """
 from typing import Dict, Any, Optional, List, Tuple
 import os
+from pathlib import Path
 
 from app.utils.logger import get_logger
 
@@ -19,6 +20,26 @@ logger = get_logger(__name__)
 
 # 配置缓存
 _config_cache: Optional[Dict[str, Any]] = None
+_env_loaded = False
+
+
+def _load_env_files_once() -> None:
+    """Load repo/backend .env files when the process entrypoint did not do it."""
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+    try:
+        from dotenv import load_dotenv
+    except Exception as e:
+        logger.debug(f"python-dotenv unavailable; using process env only: {e}")
+        return
+
+    backend_dir = Path(__file__).resolve().parents[2]
+    root_dir = backend_dir.parent
+    for env_path in (root_dir / ".env", backend_dir / ".env"):
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
 
 
 def load_addon_config() -> Dict[str, Any]:
@@ -35,6 +56,7 @@ def load_addon_config() -> Dict[str, Any]:
     # 如果缓存存在，直接返回
     if _config_cache is not None:
         return _config_cache
+    _load_env_files_once()
     
     config: Dict[str, Any] = {}
 
@@ -126,6 +148,13 @@ def load_addon_config() -> Dict[str, Any]:
         ('FINNHUB_API_KEY', 'finnhub.api_key', 'string'),
         ('FINNHUB_TIMEOUT', 'finnhub.timeout', 'int'),
         ('FINNHUB_RATE_LIMIT', 'finnhub.rate_limit', 'int'),
+        ('FINNHUB_FREE_ONLY', 'finnhub.free_only', 'bool'),
+
+        # Trading Economics calendar (guest/free works without a paid key)
+        ('TRADING_ECONOMICS_CLIENT', 'tradingeconomics.client', 'string'),
+        ('TRADING_ECONOMICS_KEY', 'tradingeconomics.key', 'string'),
+        ('TRADING_ECONOMICS_BASE_URL', 'tradingeconomics.base_url', 'string'),
+        ('TRADING_ECONOMICS_TIMEOUT', 'tradingeconomics.timeout', 'int'),
 
         # Crypto analytics
         ('COINGLASS_API_KEY', 'coinglass.api_key', 'string'),
@@ -254,7 +283,8 @@ def clear_config_cache():
     """
     清除配置缓存（配置更新后调用）
     """
-    global _config_cache
+    global _config_cache, _env_loaded
     _config_cache = None
+    _env_loaded = False
     logger.debug("Addon config cache cleared")
 

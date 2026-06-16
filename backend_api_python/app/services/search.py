@@ -776,6 +776,32 @@ class SearchService:
     def is_available(self) -> bool:
         """检查是否有可用的搜索引擎"""
         return any(p.is_available for p in self._providers)
+
+    def provider_status(self) -> List[Dict[str, Any]]:
+        """Return configured search provider diagnostics for agent context."""
+        from app.config import APIKeys
+
+        google_cfg = self._config.get('google', {}) if isinstance(self._config, dict) else {}
+        bing_cfg = self._config.get('bing', {}) if isinstance(self._config, dict) else {}
+        configured = {
+            "Google": bool(google_cfg.get('api_key') and google_cfg.get('cx')),
+            "Bing": bool(bing_cfg.get('api_key')),
+            "Tavily": bool(APIKeys.TAVILY_API_KEYS),
+            "SerpAPI": bool(APIKeys.SERPAPI_KEYS),
+            "DuckDuckGo": True,
+        }
+        active_names = {provider.name for provider in self._providers}
+        active_available = {provider.name: provider.is_available for provider in self._providers}
+        return [
+            {
+                "provider": name,
+                "configured": bool(configured.get(name)),
+                "registered": name in active_names,
+                "available": bool(active_available.get(name)),
+                "note": _search_provider_note(name, bool(configured.get(name)), name in active_names),
+            }
+            for name in ("Google", "Bing", "Tavily", "SerpAPI", "DuckDuckGo")
+        ]
     
     def search(self, query: str, num_results: int = None, date_restrict: str = None, days: int = 7) -> List[Dict[str, Any]]:
         """
@@ -907,6 +933,21 @@ def get_search_service() -> SearchService:
     if _search_service is None:
         _search_service = SearchService()
     return _search_service
+
+
+def _search_provider_note(name: str, configured: bool, registered: bool) -> str:
+    """Describe why a search provider can or cannot be used."""
+    if name == "Google" and not configured:
+        return "Set SEARCH_GOOGLE_API_KEY and SEARCH_GOOGLE_CX to enable Google Custom Search fallback."
+    if name == "Bing" and not configured:
+        return "Set SEARCH_BING_API_KEY to enable Bing fallback."
+    if name == "Tavily" and not configured:
+        return "Set TAVILY_API_KEYS to enable Tavily AI search."
+    if name == "SerpAPI" and not configured:
+        return "Set SERPAPI_KEYS to enable SerpAPI Google/Bing search."
+    if configured and not registered:
+        return "Configured but not registered by the current search service instance; restart backend."
+    return "ready" if configured or name == "DuckDuckGo" else "not configured"
 
 
 def reset_search_service() -> None:
