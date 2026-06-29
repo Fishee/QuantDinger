@@ -191,10 +191,10 @@ class TestValidateIllegalCombos:
                 trade_direction="long",
             )
 
-    def test_mt5_is_no_longer_supported(self):
+    def test_removed_broker_is_reported_as_unknown_before_market_guard(self):
         with pytest.raises(ValueError, match="Unknown exchange_id"):
             validate_strategy_config(
-                exchange_id="mt5",
+                exchange_id="legacybroker",
                 market_category="Forex",
                 market_type="spot",
                 trade_direction="long",

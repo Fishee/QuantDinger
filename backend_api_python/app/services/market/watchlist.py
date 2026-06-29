@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from typing import Optional
 
 from app.data.market_symbols_seed import get_symbol_name as seed_get_symbol_name
+from app.services.market.symbol_search import find_market_symbol
 from app.services.symbol_name import normalize_crypto_symbol, persist_seed_name, resolve_symbol_name
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
@@ -14,7 +15,6 @@ logger = get_logger(__name__)
 VALID_MARKETS = frozenset({
     "Crypto", "USStock", "CNStock", "HKStock", "Forex", "Futures", "MOEX",
 })
-NAME_REQUIRED_MARKETS = frozenset({"USStock", "CNStock", "HKStock"})
 CN_A_SHARE_PATTERN = re.compile(r"^\d{6}$")
 
 _name_resolve_executor = ThreadPoolExecutor(
@@ -73,8 +73,8 @@ def add_watchlist_item(user_id: int, market: str, raw_symbol: str, name_in: str 
         logger.info("Rejecting watchlist add for user %s: %s", user_id, validation_err)
         return False, validation_err
 
-    resolved = resolve_symbol_name_bounded(market, symbol) or seed_get_symbol_name(market, symbol)
-    if not resolved and market in NAME_REQUIRED_MARKETS:
+    matched = find_market_symbol(market, symbol)
+    if not matched:
         err = (
             f"Symbol '{symbol}' not found on {market}. "
             "Please verify the ticker and market, or pick from search results."
@@ -82,6 +82,11 @@ def add_watchlist_item(user_id: int, market: str, raw_symbol: str, name_in: str 
         logger.info("Rejecting watchlist add for user %s: %s", user_id, err)
         return False, err
 
+    resolved = (
+        (matched.get("name") or "").strip()
+        or resolve_symbol_name_bounded(market, symbol)
+        or seed_get_symbol_name(market, symbol)
+    )
     name = (name_in or "").strip() or resolved or symbol
     persist_seed_name(market, symbol, name)
 

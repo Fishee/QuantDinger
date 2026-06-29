@@ -173,16 +173,14 @@ def validate_strategy_config(
     td = (trade_direction or "").strip().lower()
     bt = (bot_type or "").strip().lower()
 
-    # Rule 1: market is one we can route in live trading
-    if mc and mc not in LIVE_MARKET_CATEGORIES:
-        raise ValueError(
-            f"market_category='{mc}' is not supported for live trading. "
-            f"Supported: {sorted(LIVE_MARKET_CATEGORIES)}. "
-            "(CNStock / HKStock / MOEX / Futures are analysis-only.)"
-        )
-
     # Rule 2 + 3: broker x market combination
     if not ex:
+        if mc and mc not in LIVE_MARKET_CATEGORIES:
+            raise ValueError(
+                f"market_category='{mc}' is not supported for live trading. "
+                f"Supported: {sorted(LIVE_MARKET_CATEGORIES)}. "
+                "(CNStock / HKStock / MOEX / Futures are analysis-only.)"
+            )
         if require_exchange:
             raise ValueError(
                 "exchange_id is required for live strategies. "
@@ -197,6 +195,16 @@ def validate_strategy_config(
         known = sorted(BROKER_MARKETS.keys())
         raise ValueError(
             f"Unknown exchange_id='{ex}'. Known brokers: {known}."
+        )
+
+    # Rule 1: market is one we can route in live trading. This runs after the
+    # broker existence check so removed brokers report as unknown even when
+    # paired with an analysis-only market.
+    if mc and mc not in LIVE_MARKET_CATEGORIES:
+        raise ValueError(
+            f"market_category='{mc}' is not supported for live trading. "
+            f"Supported: {sorted(LIVE_MARKET_CATEGORIES)}. "
+            "(CNStock / HKStock / MOEX / Futures are analysis-only.)"
         )
 
     if mc and mc not in BROKER_MARKETS[ex]:

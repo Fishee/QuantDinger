@@ -63,9 +63,49 @@ def search_market_symbols(market: str, keyword: str, limit: int = 20) -> list:
     return dedupe_symbol_results(out, limit)
 
 
+def find_market_symbol(market: str, symbol: str) -> dict | None:
+    """Return an exact symbol match from local seed or supported external sources."""
+    market = (market or "").strip()
+    symbol = (symbol or "").strip().upper()
+    if not market or not symbol:
+        return None
+
+    local = dedupe_symbol_results(
+        seed_search_symbols(market=market, keyword=symbol, limit=10),
+        10,
+    )
+    exact = _first_exact_match(local, market, symbol)
+    if exact:
+        return exact
+
+    if market == "Crypto":
+        rows = _search_crypto_exchange(symbol, 10, set())
+    elif market in {"USStock", "CNStock", "HKStock"}:
+        rows = _search_external_symbols(market, symbol, 10, set())
+    else:
+        rows = []
+
+    return _first_exact_match(rows, market, symbol)
+
+
 def get_hot_symbols(market: str, limit: int = 10) -> list:
     """Return curated hot symbols for a market."""
     return seed_get_hot_symbols(market=(market or "").strip(), limit=int(limit or 10))
+
+
+def _first_exact_match(items: Iterable[dict], market: str, symbol: str) -> dict | None:
+    want_market = (market or "").strip()
+    want_symbol = (symbol or "").strip().upper()
+    for item in items or []:
+        item_market = (item.get("market") or "").strip()
+        item_symbol = (item.get("symbol") or "").strip().upper()
+        if item_market == want_market and item_symbol == want_symbol:
+            return {
+                "market": item_market,
+                "symbol": item_symbol,
+                "name": (item.get("name") or "").strip(),
+            }
+    return None
 
 
 def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
