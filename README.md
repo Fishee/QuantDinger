@@ -800,3 +800,27 @@ QuantDinger stands on top of a strong open-source ecosystem. Special thanks to p
 
 <p align="center"><sub>If QuantDinger is useful to you, a GitHub star helps the project a lot.</sub></p>
 
+## 同步服务器
+
+```text
+rsync -avz --delete \
+-e "ssh -i ~/.ssh/google_compute_engine -o IdentitiesOnly=yes" \
+--exclude='.git/' \
+--exclude='**/.git/' \
+--exclude='node_modules/' \
+--exclude='.venv/' \
+--exclude='venv/' \
+--exclude='__pycache__/' \
+--exclude='.cache/' \
+--exclude='dist/' \
+--exclude='build/' \
+--exclude='*.log' \
+./ \
+xiang@34.143.227.108:~/quantdinger/
+```
+
+
+## Build并运行
+```
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+```
