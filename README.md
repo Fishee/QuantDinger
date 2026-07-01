@@ -815,6 +815,7 @@ rsync -avz --delete \
 --exclude='dist/' \
 --exclude='build/' \
 --exclude='*.log' \
+--exclude='**/tests' \
 ./ \
 xiang@34.143.227.108:~/quantdinger/
 ```
@@ -822,5 +823,5 @@ xiang@34.143.227.108:~/quantdinger/
 
 ## Build并运行
 ```
-docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
