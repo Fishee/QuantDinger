@@ -316,6 +316,7 @@ def test_fetch_latest_kline_keeps_xaut_on_configured_crypto_market():
         market_category="Crypto",
         exchange_id="bitget",
         market_type="swap",
+        exchange_config={"exchange_id": "bitget", "api_key": "k"},
     )
 
     assert len(out) == 2
@@ -323,6 +324,7 @@ def test_fetch_latest_kline_keeps_xaut_on_configured_crypto_market():
     assert kwargs["market"] == "Crypto"
     assert kwargs["exchange_id"] == "bitget"
     assert kwargs["market_type"] == "swap"
+    assert kwargs["exchange_config"] == {"exchange_id": "bitget", "api_key": "k"}
 
 
 @patch("app.services.trading_executor.append_strategy_log")

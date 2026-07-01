@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.grid.exchange_orders import query_grid_order_fill
+from app.services.alpaca_trading.client import AlpacaClient, OrderResult
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.bitget import BitgetMixClient
@@ -229,6 +230,34 @@ def test_query_grid_order_fill_returns_unknown_when_get_order_raises():
         exchange_order_id="oid-1",
     )
     assert (filled, avg, status) == (0.0, 0.0, "unknown")
+
+
+def test_query_grid_order_fill_supports_alpaca_order_status():
+    client = _make_client(AlpacaClient)
+    client.get_order_status.return_value = OrderResult(
+        success=True,
+        order_id="alp-1",
+        filled=0.0123,
+        avg_price=65000.0,
+        status="filled",
+        raw={
+            "id": "alp-1",
+            "status": "filled",
+            "filled_qty": "0.0123",
+            "filled_avg_price": "65000",
+        },
+    )
+
+    filled, avg, status = query_grid_order_fill(
+        client,
+        symbol="BTC/USD",
+        market_type="spot",
+        exchange_order_id="alp-1",
+        exchange_config={"exchange_id": "alpaca"},
+    )
+
+    assert (filled, avg, status) == (0.0123, 65000.0, "filled")
+    client.get_order_status.assert_called_once_with("alp-1")
 
 
 def test_poller_marks_filled_when_exchange_reports_fill():

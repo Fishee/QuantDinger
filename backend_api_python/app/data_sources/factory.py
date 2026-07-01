@@ -67,12 +67,12 @@ class DataSourceFactory:
     数据源工厂。
     K 线 / 报价 使用哪个接口完全由调用方传入的 market（与自选分类一致）决定，不做根据 symbol 字符串的推断。
     """
-    
+
     _sources: Dict[str, BaseDataSource] = {}
     _noise_lock = threading.Lock()
     _noise_seen: Dict[str, tuple[float, int]] = {}
     _noise_interval_sec = _env_positive_int("LOG_DEDUPE_INTERVAL_SEC", 60)
-    
+
     # Markets that pass through normalize_market unchanged.
     _CANONICAL_MARKETS = ("Crypto", "Forex", "Futures", "USStock", "CNStock", "HKStock", "MOEX")
 
@@ -137,10 +137,10 @@ class DataSourceFactory:
     def get_source(cls, market: str) -> BaseDataSource:
         """
         获取指定市场的数据源
-        
+
         Args:
             market: 市场类型 (Crypto, USStock, Forex, Futures)
-            
+
         Returns:
             数据源实例
         """
@@ -175,7 +175,7 @@ class DataSourceFactory:
             name,
         )
         return cls.get_source("Crypto")
-    
+
     @classmethod
     def _create_source(cls, market: str) -> BaseDataSource:
         """创建数据源实例"""
@@ -202,7 +202,7 @@ class DataSourceFactory:
             return MOEXDataSource()
         else:
             raise UnsupportedMarketError(market)
-    
+
     @classmethod
     def get_kline(
         cls,
@@ -214,30 +214,37 @@ class DataSourceFactory:
         after_time: Optional[int] = None,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         获取K线数据的便捷方法
-        
+
         Args:
             market: 市场类型
-            symbol: 交易对/股票代码
+            symbol: 交易对/股票代码Ï
             timeframe: 时间周期
             limit: 数据条数
             before_time: 获取此时间之前的数据
             after_time: 可选，Unix 秒，K 线 time 需 >= 此值（回测左边界）
             exchange_id: 加密货币运行中策略 — 与策略绑定的交易所 (binance/okx/...)
             market_type: 加密货币运行中策略 — spot 或 swap
-            
+            exchange_config: 可选，交易所凭据配置；Alpaca crypto data API 会使用其中的 api_key/secret_key
+
         Returns:
             K线数据列表
         """
         m = cls.normalize_market(market or "")
         try:
-            source = cls._resolve_source(m, exchange_id=exchange_id, market_type=market_type)
+            source = cls._resolve_source(
+                m,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                exchange_config=exchange_config,
+            )
             klines = source.get_kline(symbol, timeframe, limit, before_time, after_time)
-            
+
             klines.sort(key=lambda x: x['time'])
-            
+
             return klines
         except Exception as e:
             cls._log_limited(
@@ -250,7 +257,7 @@ class DataSourceFactory:
                 str(e),
             )
             return []
-    
+
     @classmethod
     def _resolve_source(
         cls,
@@ -258,12 +265,18 @@ class DataSourceFactory:
         *,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> BaseDataSource:
         """Pick data source; crypto live strategies may scope to execution exchange."""
         ex = (exchange_id or "").strip().lower()
         mt = (market_type or "").strip().lower()
         if mt in ("futures", "future", "perp", "perpetual"):
             mt = "swap"
+        if market == "Crypto" and ex == "alpaca" and mt in ("", "spot"):
+            from app.data_sources.alpaca_crypto import AlpacaCryptoDataSource
+
+            logger.info("DataSourceFactory: routing Crypto K-lines to Alpaca crypto data API")
+            return AlpacaCryptoDataSource(exchange_config=exchange_config)
         if market == "Crypto" and (ex or mt == "swap"):
             from app.data_sources.crypto import CryptoDataSource
 
@@ -271,16 +284,24 @@ class DataSourceFactory:
         return cls.get_source(market)
 
     @classmethod
-    def get_ticker(cls, market: str, symbol: str, exchange_id: Optional[str] = None, market_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_ticker(
+        cls,
+        market: str,
+        symbol: str,
+        exchange_id: Optional[str] = None,
+        market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         获取实时报价的便捷方法
-        
+
         Args:
             market: 市场类型
             symbol: 交易对/股票代码
             exchange_id: 加密货币运行中策略 — 与策略绑定的交易所
             market_type: 加密货币运行中策略 — spot 或 swap
-            
+            exchange_config: 可选，交易所凭据配置
+
         Returns:
             实时报价数据: {
                 'last': 最新价,
@@ -291,7 +312,12 @@ class DataSourceFactory:
         """
         m = cls.normalize_market(market or "")
         try:
-            source = cls._resolve_source(m, exchange_id=exchange_id, market_type=market_type)
+            source = cls._resolve_source(
+                m,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                exchange_config=exchange_config,
+            )
             return source.get_ticker(symbol)
         except NotImplementedError:
             cls._log_limited(
@@ -311,4 +337,3 @@ class DataSourceFactory:
                 str(e),
             )
             return {'last': 0, 'symbol': symbol}
-

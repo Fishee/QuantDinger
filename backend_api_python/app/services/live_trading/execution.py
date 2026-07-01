@@ -305,6 +305,7 @@ def place_order_from_signal(
             symbol=symbol,
             amount=qty,
             exchange_config=exchange_config,
+            client_order_id=client_order_id,
         )
 
     raise LiveTradingError(f"Unsupported client type: {type(client)}")
@@ -317,6 +318,7 @@ def _place_ibkr_order(
     symbol: str,
     amount: float,
     exchange_config: Optional[Dict[str, Any]] = None,
+    client_order_id: Optional[str] = None,
 ) -> LiveOrderResult:
     """
     Place order via IBKR for US stocks.
@@ -354,7 +356,7 @@ def _place_ibkr_order(
 
     # Convert IBKRClient result to LiveOrderResult format
     return LiveOrderResult(
-        success=result.success,
+        exchange_id="ibkr",
         exchange_order_id=str(result.order_id) if result.order_id else "",
         filled=result.filled,
         avg_price=result.avg_price,
@@ -373,6 +375,7 @@ def _place_alpaca_order(
     symbol: str,
     amount: float,
     exchange_config: Optional[Dict[str, Any]] = None,
+    client_order_id: Optional[str] = None,
 ) -> LiveOrderResult:
     """
     Place order via Alpaca for US stocks (USStock) or crypto.
@@ -399,17 +402,19 @@ def _place_alpaca_order(
 
     cfg = exchange_config if isinstance(exchange_config, dict) else {}
     raw_market = str(cfg.get("market_category") or cfg.get("market_type") or "USStock").strip().lower()
-    market_type = "crypto" if raw_market in ("crypto", "cryptocurrency") else "USStock"
+    symbol_looks_crypto = "/" in str(symbol or "")
+    market_type = "crypto" if raw_market in ("crypto", "cryptocurrency") or symbol_looks_crypto else "USStock"
 
     result = client.place_market_order(
         symbol=symbol,
         side=action,
         quantity=amount,
         market_type=market_type,
+        client_order_id=client_order_id,
     )
 
     return LiveOrderResult(
-        success=result.success,
+        exchange_id="alpaca",
         exchange_order_id=str(result.order_id) if result.order_id else "",
         filled=result.filled,
         avg_price=result.avg_price,

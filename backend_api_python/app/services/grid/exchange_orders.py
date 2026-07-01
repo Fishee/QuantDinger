@@ -22,6 +22,11 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from app.services.alpaca_trading import AlpacaClient
+except Exception:  # pragma: no cover - alpaca-py is optional at import time
+    AlpacaClient = None  # type: ignore
+
 
 def make_grid_initial_client_order_id(strategy_id: int, leg: str = "") -> str:
     """Stable client oid for grid initial market leg (one per strategy/leg, avoids duplicate opens)."""
@@ -195,6 +200,30 @@ def place_grid_limit_order(
             reduce_only=reduce_only,
             client_order_id=coid or None,
         )
+    if AlpacaClient is not None and isinstance(client, AlpacaClient):
+        if mt != "spot":
+            raise LiveTradingError("Alpaca grid trading supports spot only")
+        result = client.place_limit_order(
+            symbol=str(symbol),
+            side=sd,
+            quantity=qty,
+            price=px,
+            market_type="crypto",
+            client_order_id=coid or None,
+        )
+        if not result.success:
+            raise LiveTradingError(result.message or "Alpaca limit order rejected")
+        return LiveOrderResult(
+            exchange_id="alpaca",
+            exchange_order_id=str(result.order_id or ""),
+            filled=float(result.filled or 0),
+            avg_price=float(result.avg_price or 0),
+            raw={
+                "status": result.status,
+                "message": result.message,
+                **(result.raw or {}),
+            },
+        )
     if isinstance(client, HtxClient):
         try:
             if mt == "swap":
@@ -248,6 +277,23 @@ def wait_grid_market_fill(
                 max_wait_sec=max_wait_sec,
             )
             return float(q.get("filled") or 0), float(q.get("avg_price") or 0)
+        if AlpacaClient is not None and isinstance(client, AlpacaClient) and ex_oid:
+            import time
+
+            deadline = time.time() + float(max_wait_sec or 0)
+            while True:
+                res = client.get_order_status(ex_oid)
+                if res.success:
+                    filled = float(res.filled or 0)
+                    avg = float(res.avg_price or 0)
+                    if filled > 0:
+                        return filled, avg
+                    st = str(res.status or "").strip().lower()
+                    if st in ("rejected", "expired", "cancelled", "canceled"):
+                        return 0.0, 0.0
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.5)
         if isinstance(client, GateUsdtFuturesClient) and hasattr(client, "wait_for_fill"):
             contract = to_gate_currency_pair(str(symbol))
             q = client.wait_for_fill(
@@ -362,6 +408,10 @@ def execute_grid_market_order(
         return False, 0.0, 0.0
 
     ex_oid = str(getattr(res, "exchange_order_id", None) or "")
+    immediate_filled = _float(getattr(res, "filled", 0))
+    immediate_avg = _float(getattr(res, "avg_price", 0))
+    if immediate_filled > 0:
+        return True, immediate_filled, immediate_avg
     filled, avg = wait_grid_market_fill(
         client,
         symbol=str(symbol),
@@ -410,6 +460,12 @@ def cancel_grid_order(
             order_id=str(exchange_order_id or ""),
             client_order_id=str(client_order_id or ""),
         )
+        return
+    if AlpacaClient is not None and isinstance(client, AlpacaClient):
+        if exchange_order_id:
+            ok = client.cancel_order(str(exchange_order_id))
+            if not ok:
+                raise LiveTradingError(f"Alpaca cancel failed order_id={exchange_order_id}")
         return
     if hasattr(client, "cancel_order"):
         kwargs: Dict[str, Any] = {}
@@ -618,6 +674,19 @@ def _fetch_grid_client_order(
         return _unwrap_client_order_payload(client.get_order(order_id=oid))
     if isinstance(client, HtxClient):
         return client.get_order(symbol=str(symbol), order_id=oid, client_order_id=coid)
+    if AlpacaClient is not None and isinstance(client, AlpacaClient):
+        if not oid:
+            return {}
+        result = client.get_order_status(oid)
+        raw = dict(result.raw or {})
+        raw.setdefault("status", result.status)
+        raw.setdefault("filled_qty", result.filled)
+        raw.setdefault("filled", result.filled)
+        raw.setdefault("filled_avg_price", result.avg_price)
+        raw.setdefault("avg_price", result.avg_price)
+        raw.setdefault("id", result.order_id)
+        raw.setdefault("orderId", result.order_id)
+        return raw
     if hasattr(client, "get_order"):
         try:
             raw = client.get_order(symbol=str(symbol), order_id=oid, client_order_id=coid)

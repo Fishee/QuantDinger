@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.grid.exchange_orders import place_grid_limit_order
+from app.services.alpaca_trading.client import AlpacaClient, OrderResult
 from app.services.live_trading.base import LiveOrderResult
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
@@ -275,3 +276,40 @@ def test_place_grid_limit_order_sets_leverage_for_contract_clients():
     client.set_leverage.assert_called_once()
     assert client.set_leverage.call_args.kwargs["hold_side"] == "long"
     assert client.set_leverage.call_args.kwargs["product_type"] == "USDT-FUTURES"
+
+
+def test_place_grid_limit_order_supports_alpaca_crypto_spot():
+    client = MagicMock()
+    client.__class__ = AlpacaClient
+    client.place_limit_order.return_value = OrderResult(
+        success=True,
+        order_id="alp-1",
+        filled=0.0,
+        avg_price=0.0,
+        status="new",
+        raw={"id": "alp-1"},
+    )
+
+    result = place_grid_limit_order(
+        client,
+        symbol="BTC/USD",
+        side="buy",
+        quantity=0.01,
+        price=70000.0,
+        market_type="spot",
+        exchange_config={"exchange_id": "alpaca", "market_category": "Crypto"},
+        pos_side="long",
+        reduce_only=False,
+        client_order_id="coid-1",
+    )
+
+    assert result.exchange_id == "alpaca"
+    assert result.exchange_order_id == "alp-1"
+    assert client.place_limit_order.call_args.kwargs == {
+        "symbol": "BTC/USD",
+        "side": "buy",
+        "quantity": 0.01,
+        "price": 70000.0,
+        "market_type": "crypto",
+        "client_order_id": "coid-1",
+    }

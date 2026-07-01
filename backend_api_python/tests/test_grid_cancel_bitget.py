@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.services.grid.config import sanitize_grid_bot_params
 from app.services.grid.exchange_orders import cancel_grid_order
+from app.services.alpaca_trading.client import AlpacaClient
 from app.services.live_trading.bitget import BitgetMixClient
 
 
@@ -40,3 +41,24 @@ def test_cancel_grid_order_bitget_passes_product_type():
     assert client.last_cancel["margin_coin"] == "USDT"
     assert client.last_cancel["order_id"] == "1445428223646216193"
     assert client.last_cancel["client_oid"] == "g001c005e12345"
+
+
+def test_cancel_grid_order_alpaca_uses_exchange_order_id():
+    class FakeAlpaca(AlpacaClient):
+        def __init__(self):
+            self.last_order_id = ""
+
+        def cancel_order(self, order_id):
+            self.last_order_id = order_id
+            return True
+
+    client = FakeAlpaca()
+    cancel_grid_order(
+        client,
+        symbol="BTC/USD",
+        market_type="spot",
+        exchange_order_id="alp-1",
+        client_order_id="coid-1",
+    )
+
+    assert client.last_order_id == "alp-1"

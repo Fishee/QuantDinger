@@ -37,6 +37,11 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from app.services.alpaca_trading import AlpacaClient
+except Exception:  # pragma: no cover - alpaca-py is optional at import time
+    AlpacaClient = None  # type: ignore
+
 
 def _float(v: Any) -> float:
     try:
@@ -194,6 +199,9 @@ def extract_grid_fill_base_qty(
     if isinstance(client, KrakenFuturesClient):
         return _float(data.get("filledSize") or data.get("filled_size"))
 
+    if AlpacaClient is not None and isinstance(client, AlpacaClient):
+        return _float(data.get("filled_qty") or data.get("filledQty") or data.get("filled"))
+
     if client is None and data.get("filled_total") and data.get("filled_amount"):
         filled_amt = _float(data.get("filled_amount"))
         filled_total = _float(data.get("filled_total"))
@@ -203,6 +211,8 @@ def extract_grid_fill_base_qty(
     # Generic fallback: legacy path, may be wrong for contract-denominated exchanges.
     return _float(
         data.get("filled")
+        or data.get("filled_qty")
+        or data.get("filledQty")
         or data.get("executedQty")
         or data.get("cumExecQty")
         or data.get("baseVolume")
@@ -272,10 +282,20 @@ def extract_grid_fill_avg_price(
     if isinstance(client, KrakenFuturesClient):
         return _float(data.get("avgFillPrice") or data.get("avg_fill_price"))
 
+    if AlpacaClient is not None and isinstance(client, AlpacaClient):
+        return _float(
+            data.get("filled_avg_price")
+            or data.get("filledAvgPrice")
+            or data.get("avg_price")
+            or data.get("avgPrice")
+        )
+
     avg = _float(
         data.get("avgPx")
         or data.get("avgPrice")
         or data.get("avg_price")
+        or data.get("filled_avg_price")
+        or data.get("filledAvgPrice")
         or data.get("fill_price")
         or data.get("trade_avg_price")
         or data.get("price")
@@ -328,6 +348,8 @@ def order_status_from_data(data: Dict[str, Any]) -> str:
         data.get("accFillSz")
         or data.get("executedQty")
         or data.get("cumExecQty")
+        or data.get("filled_qty")
+        or data.get("filledQty")
         or data.get("baseVolume")
         or data.get("dealSize")
         or data.get("trade_volume")

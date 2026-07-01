@@ -8,6 +8,7 @@ Supports US stocks, ETFs, and crypto on both paper and live accounts.
 import time
 import threading
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Optional, Dict, Any, List, Union
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
@@ -51,6 +52,26 @@ def _num(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _alpaca_decimal_float(
+    value: Any,
+    *,
+    places: int = 9,
+    rounding: str = ROUND_HALF_UP,
+    default: float = 0.0,
+) -> float:
+    """Normalize numeric order fields to Alpaca's max decimal precision."""
+    try:
+        if value is None or value == "":
+            return default
+        decimal_value = Decimal(str(value))
+        if not decimal_value.is_finite():
+            return default
+        quant = Decimal("1").scaleb(-max(0, int(places)))
+        return float(decimal_value.quantize(quant, rounding=rounding))
+    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
+        return _num(value, default=default)
+
+
 def _str_attr(obj: Any, name: str, default: str = "") -> str:
     return str(getattr(obj, name, default) or default)
 
@@ -61,6 +82,15 @@ def _format_alpaca_error(err: Exception, *, context: str = "") -> str:
     low = msg.lower()
     prefix = f"{context}: " if context else ""
     if "invalid syntax" in low or '"code":400' in low or "code 400" in low:
+        if "account" in (context or "").lower() or "rest" in (context or "").lower():
+            return (
+                prefix
+                + "Alpaca trading REST returned HTTP 400 invalid syntax. "
+                "Check that base_url is empty or a trading REST host "
+                "(https://paper-api.alpaca.markets or https://api.alpaca.markets), "
+                "not data.alpaca.markets, stream.data.alpaca.markets, or a WebSocket URL. "
+                f"Raw error: {msg}"
+            )
         return (
             prefix
             + "Alpaca 返回 400 invalid syntax。若使用行情 WebSocket，请确认："
@@ -87,11 +117,41 @@ def normalize_base_url(base_url: Optional[str]) -> Optional[str]:
     raw = (base_url or "").strip()
     if not raw:
         return None
+    if raw.lower().startswith(("wss://", "ws://")):
+        logger.warning(
+            "Ignoring Alpaca base_url override %r: WebSocket URLs are market-data stream endpoints, "
+            "not trading REST endpoints.",
+            raw,
+        )
+        return None
     if "://" not in raw:
         raw = "https://" + raw
 
     parts = urlsplit(raw)
+    host = (parts.netloc or "").lower()
+    scheme = (parts.scheme or "https").lower()
     path = (parts.path or "").rstrip("/")
+    if "data.alpaca.markets" in host:
+        logger.warning(
+            "Ignoring Alpaca base_url override %r: Alpaca data hosts are not trading REST hosts.",
+            raw,
+        )
+        return None
+    if scheme not in ("http", "https"):
+        logger.warning(
+            "Ignoring Alpaca base_url override %r: expected http(s) trading REST URL.",
+            raw,
+        )
+        return None
+    if host in ("paper-api.alpaca.markets", "api.alpaca.markets"):
+        path = ""
+    elif path and path.lower() != "/v2":
+        logger.warning(
+            "Ignoring Alpaca base_url path %r for host %s; TradingClient appends /v2 internally.",
+            path,
+            host,
+        )
+        path = ""
     if path.lower() == "/v2":
         path = ""
     normalized = urlunsplit((parts.scheme or "https", parts.netloc, path, "", ""))
@@ -146,6 +206,13 @@ class AlpacaConfig:
     def __post_init__(self):
         self.api_key = (self.api_key or "").strip()
         self.secret_key = (self.secret_key or "").strip()
+        key = self.api_key.upper()
+        if key.startswith("PK") and self.paper is False:
+            logger.warning("AlpacaConfig paper=False conflicts with PK* key; using paper=True")
+            self.paper = True
+        elif key.startswith("AK") and self.paper is True:
+            logger.warning("AlpacaConfig paper=True conflicts with AK* key; using paper=False")
+            self.paper = False
         self.base_url = normalize_base_url(self.base_url)
 
 
@@ -175,6 +242,7 @@ class AlpacaClient:
         self._stock_data_client = None
         self._crypto_data_client = None
         self._account_id: Optional[str] = None
+        self.last_error: str = ""
 
     @property
     def connected(self) -> bool:
@@ -187,8 +255,10 @@ class AlpacaClient:
             modules = _ensure_alpaca()
             api_key = (self.config.api_key or "").strip()
             secret_key = (self.config.secret_key or "").strip()
+            self.last_error = ""
             if not api_key or not secret_key:
-                logger.error("Alpaca connect failed: empty api_key or secret_key")
+                self.last_error = "empty api_key or secret_key"
+                logger.error("Alpaca connect failed: %s", self.last_error)
                 return False
 
             self._trading_client = modules["TradingClient"](
@@ -197,32 +267,71 @@ class AlpacaClient:
                 paper=self.config.paper,
                 url_override=self.config.base_url,
             )
-            # Align market-data REST with paper sandbox when using PK* keys.
-            data_sandbox = bool(self.config.paper)
-            self._stock_data_client = modules["StockHistoricalDataClient"](
-                api_key=api_key,
-                secret_key=secret_key,
-                sandbox=data_sandbox,
-            )
-            self._crypto_data_client = modules["CryptoHistoricalDataClient"](
-                api_key=api_key,
-                secret_key=secret_key,
-                sandbox=data_sandbox,
-            )
             # Verify by fetching account
             account = self._trading_client.get_account()
             self._account_id = _as_str_id(account.id)
+            self._init_data_clients_best_effort(modules, api_key, secret_key)
             mode = "paper" if self.config.paper else "live"
             logger.info(
                 f"Alpaca connected ({mode}), account={_id_log_prefix(self._account_id)}..., "
                 f"status={account.status}"
             )
+            self.last_error = ""
             return True
         except Exception as e:
-            logger.error("Alpaca connect failed: %s", _format_alpaca_error(e, context="REST account"))
+            self.last_error = _format_alpaca_error(e, context="REST account")
+            logger.error("Alpaca connect failed: %s", self.last_error)
             self._trading_client = None
             self._account_id = None
             return False
+
+    def _init_data_clients_best_effort(
+        self,
+        modules: Dict[str, Any],
+        api_key: str,
+        secret_key: str,
+    ) -> None:
+        """Initialize Alpaca market-data clients without blocking trading REST."""
+        if self._stock_data_client is not None and self._crypto_data_client is not None:
+            return
+        try:
+            data_sandbox = bool(self.config.paper)
+            if self._stock_data_client is None:
+                self._stock_data_client = modules["StockHistoricalDataClient"](
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    sandbox=data_sandbox,
+                )
+            if self._crypto_data_client is None:
+                self._crypto_data_client = modules["CryptoHistoricalDataClient"](
+                    api_key=api_key,
+                    secret_key=secret_key,
+                    sandbox=data_sandbox,
+                )
+        except TypeError as exc:
+            logger.warning(
+                "Alpaca market-data client init with sandbox flag failed; retrying without sandbox: %s",
+                exc,
+            )
+            try:
+                if self._stock_data_client is None:
+                    self._stock_data_client = modules["StockHistoricalDataClient"](
+                        api_key=api_key,
+                        secret_key=secret_key,
+                    )
+                if self._crypto_data_client is None:
+                    self._crypto_data_client = modules["CryptoHistoricalDataClient"](
+                        api_key=api_key,
+                        secret_key=secret_key,
+                    )
+            except Exception as retry_exc:
+                logger.warning("Alpaca market-data client init failed: %s", retry_exc)
+                self._stock_data_client = None
+                self._crypto_data_client = None
+        except Exception as exc:
+            logger.warning("Alpaca market-data client init failed: %s", exc)
+            self._stock_data_client = None
+            self._crypto_data_client = None
 
     def disconnect(self):
         """Alpaca is stateless REST — disconnect just clears local state."""
@@ -245,19 +354,32 @@ class AlpacaClient:
         side: str,
         quantity: float,
         market_type: str = "USStock",
+        client_order_id: Optional[str] = None,
     ) -> OrderResult:
         """Place a market order. market_type: 'USStock' or 'crypto'."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
+            qty = _alpaca_decimal_float(quantity, rounding=ROUND_DOWN)
+            if qty <= 0:
+                message = f"Invalid Alpaca quantity after precision normalization: {quantity}"
+                logger.error(message)
+                return OrderResult(success=False, message=message)
 
-            req = modules["MarketOrderRequest"](
-                symbol=sym,
-                qty=quantity,
-                side=modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
-                time_in_force=modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
-            )
+            req_kwargs = {
+                "symbol": sym,
+                "qty": qty,
+                "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
+                "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
+            }
+            if client_order_id:
+                req_kwargs["client_order_id"] = str(client_order_id)
+            try:
+                req = modules["MarketOrderRequest"](**req_kwargs)
+            except TypeError:
+                req_kwargs.pop("client_order_id", None)
+                req = modules["MarketOrderRequest"](**req_kwargs)
             order = self._trading_client.submit_order(order_data=req)
 
             # Brief poll for fill status
@@ -278,9 +400,13 @@ class AlpacaClient:
                 message=f"Order {status}" if rejected else "Order submitted",
                 raw={
                     "id": str(order.id),
+                    "orderId": str(order.id),
                     "status": status,
                     "filled_qty": filled_qty,
+                    "filled": filled_qty,
+                    "qty": qty,
                     "submitted_at": str(order.submitted_at),
+                    "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id or ""),
                 },
             )
         except Exception as e:
@@ -295,21 +421,38 @@ class AlpacaClient:
         price: float,
         market_type: str = "USStock",
         extended_hours: bool = False,
+        client_order_id: Optional[str] = None,
     ) -> OrderResult:
         """Place a limit order. extended_hours=True for pre/post-market."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
+            qty = _alpaca_decimal_float(quantity, rounding=ROUND_DOWN)
+            limit_price = _alpaca_decimal_float(price, rounding=ROUND_HALF_UP)
+            if qty <= 0 or limit_price <= 0:
+                message = (
+                    "Invalid Alpaca limit order quantity/price after precision normalization: "
+                    f"quantity={quantity}, price={price}"
+                )
+                logger.error(message)
+                return OrderResult(success=False, message=message)
 
-            req = modules["LimitOrderRequest"](
-                symbol=sym,
-                qty=quantity,
-                side=modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
-                time_in_force=modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
-                limit_price=price,
-                extended_hours=extended_hours if asset_class == "us_equity" else False,
-            )
+            req_kwargs = {
+                "symbol": sym,
+                "qty": qty,
+                "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
+                "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
+                "limit_price": limit_price,
+                "extended_hours": extended_hours if asset_class == "us_equity" else False,
+            }
+            if client_order_id:
+                req_kwargs["client_order_id"] = str(client_order_id)
+            try:
+                req = modules["LimitOrderRequest"](**req_kwargs)
+            except TypeError:
+                req_kwargs.pop("client_order_id", None)
+                req = modules["LimitOrderRequest"](**req_kwargs)
             order = self._trading_client.submit_order(order_data=req)
             time.sleep(1)
             order = self._trading_client.get_order_by_id(order.id)
@@ -328,9 +471,16 @@ class AlpacaClient:
                 message=f"Limit order {status}" if rejected else "Limit order submitted",
                 raw={
                     "id": str(order.id),
+                    "orderId": str(order.id),
                     "status": status,
-                    "limit_price": price,
+                    "filled_qty": filled_qty,
+                    "filled": filled_qty,
+                    "filled_avg_price": avg_price,
+                    "avg_price": avg_price,
+                    "qty": _num(getattr(order, "qty", qty)),
+                    "limit_price": limit_price,
                     "extended_hours": extended_hours,
+                    "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id or ""),
                 },
             )
         except Exception as e:
@@ -360,12 +510,16 @@ class AlpacaClient:
             avg_price = _num(getattr(order, "filled_avg_price", 0))
             raw = {
                 "id": str(getattr(order, "id", "") or ""),
+                "orderId": str(getattr(order, "id", "") or ""),
                 "status": status,
                 "filled_qty": filled_qty,
+                "filled": filled_qty,
                 "filled_avg_price": avg_price,
+                "avg_price": avg_price,
                 "qty": _num(getattr(order, "qty", 0)),
                 "symbol": str(getattr(order, "symbol", "") or ""),
                 "side": _enum_value(getattr(order, "side", "")),
+                "client_order_id": str(getattr(order, "client_order_id", "") or ""),
                 "submitted_at": str(getattr(order, "submitted_at", "") or ""),
                 "filled_at": str(getattr(order, "filled_at", "") or ""),
                 "canceled_at": str(getattr(order, "canceled_at", "") or ""),
@@ -511,12 +665,21 @@ class AlpacaClient:
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
+            self._init_data_clients_best_effort(
+                modules,
+                (self.config.api_key or "").strip(),
+                (self.config.secret_key or "").strip(),
+            )
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
 
             if asset_class == "crypto":
+                if self._crypto_data_client is None:
+                    return {"success": False, "error": "Alpaca crypto data client is unavailable"}
                 req = modules["CryptoLatestQuoteRequest"](symbol_or_symbols=[sym])
                 quotes = self._crypto_data_client.get_crypto_latest_quote(req)
             else:
+                if self._stock_data_client is None:
+                    return {"success": False, "error": "Alpaca stock data client is unavailable"}
                 req = modules["StockLatestQuoteRequest"](symbol_or_symbols=[sym])
                 quotes = self._stock_data_client.get_stock_latest_quote(req)
 

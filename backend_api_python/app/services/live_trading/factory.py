@@ -47,6 +47,43 @@ def _get(cfg: Dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() in ("1", "true", "yes", "on", "paper")
+    if value is None or value == "":
+        return default
+    return bool(value)
+
+
+def _infer_alpaca_paper(api_key: str, explicit_value: Any = None) -> bool:
+    """Alpaca key prefix is authoritative: PK*=paper, AK*=live."""
+    key = str(api_key or "").strip().upper()
+    explicit_given = explicit_value is not None and not (
+        isinstance(explicit_value, str) and not explicit_value.strip()
+    )
+    explicit = _parse_bool(explicit_value, default=False)
+    if key.startswith("PK"):
+        if explicit_given and explicit is False:
+            logger.warning("Alpaca paper flag conflicts with PK* key; using paper=True")
+        return True
+    if key.startswith("AK"):
+        if explicit_given and explicit is True:
+            logger.warning("Alpaca paper flag conflicts with AK* key; using paper=False")
+        return False
+    return explicit if explicit_given else False
+
+
+def _mask_key(value: str, keep: int = 4) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if len(s) <= keep * 2:
+        return s[: max(1, keep)] + "***"
+    return f"{s[:keep]}...{s[-keep:]}"
+
+
 # Merged from HTTP JSON root into nested `exchange_config` for /strategies/test-connection
 # when the UI sends demo/testnet toggles next to the nested object.
 EXCHANGE_CONFIG_ROOT_OVERLAY_KEYS = (
@@ -357,16 +394,12 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
     if not api_key or not secret_key:
         raise LiveTradingError("Alpaca requires api_key and secret_key")
 
-    # Paper mode: explicit flag wins; otherwise infer from key prefix (PK = paper).
+    # Paper mode: key prefix wins (PK=paper, AK=live). This avoids stale saved
+    # credential flags routing a valid key to the wrong Alpaca trading host.
     paper_raw = exchange_config.get("paper")
     if paper_raw is None:
         paper_raw = exchange_config.get("is_paper")
-    if isinstance(paper_raw, bool):
-        paper = paper_raw
-    elif isinstance(paper_raw, str) and paper_raw.strip():
-        paper = paper_raw.strip().lower() in ("1", "true", "yes", "on", "paper")
-    else:
-        paper = api_key.upper().startswith("PK")
+    paper = _infer_alpaca_paper(api_key, paper_raw)
 
     base_url = _get(exchange_config, "base_url", "baseUrl") or None
 
@@ -376,14 +409,32 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
         paper=paper,
         base_url=base_url,
     )
+    if config.base_url:
+        lower_base_url = config.base_url.lower()
+        if lower_base_url in ("https://paper-api.alpaca.markets", "https://api.alpaca.markets"):
+            expected = "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
+            if lower_base_url != expected:
+                logger.warning(
+                    "Ignoring Alpaca base_url=%s because it conflicts with key mode; using %s",
+                    config.base_url,
+                    expected,
+                )
+            config.base_url = None
 
     client = AlpacaClient(config)
     if not client.connect():
+        trading_host = config.base_url or (
+            "https://paper-api.alpaca.markets" if paper else "https://api.alpaca.markets"
+        )
+        detail = str(getattr(client, "last_error", "") or "").strip()
+        detail_msg = f" Alpaca detail: {detail}" if detail else ""
         raise LiveTradingError(
             "Failed to connect to Alpaca (REST trading API). Check api_key/secret, "
-            "paper/live (PK*=paper, AK*=live), and network access. "
-            "HTTP 400 'invalid syntax' on market-data WebSocket is usually a bad "
-            "auth/subscribe JSON or symbol (use BTC/USD not BTC/USDT for crypto)."
+            "paper/live (PK*=paper, AK*=live), network access, and that base_url is "
+            "empty or a trading REST host. "
+            f"Resolved trading REST host: {trading_host}; key={_mask_key(api_key)}. "
+            "Do not use data.alpaca.markets, stream.data.alpaca.markets, or wss:// URLs "
+            f"as Alpaca base_url.{detail_msg}"
         )
     return client
 
@@ -403,5 +454,3 @@ def query_fee_rate(
     except Exception as e:
         logger.debug(f"query_fee_rate failed for {symbol}: {e}")
         return None
-
-

@@ -224,3 +224,38 @@ def test_execute_grid_market_order_requires_fill(monkeypatch):
     assert ok2 is True
     assert filled2 == 0.004
     assert avg2 == 73000.0
+
+
+def test_execute_grid_market_order_accepts_immediate_fill(monkeypatch):
+    from app.services.grid.exchange_orders import execute_grid_market_order
+
+    class FakeResult:
+        exchange_order_id = "oid1"
+        filled = 0.006
+        avg_price = 58500.0
+
+    client = MagicMock()
+    monkeypatch.setattr(
+        "app.services.live_trading.execution.place_order_from_signal",
+        lambda *a, **k: FakeResult(),
+    )
+
+    def fail_wait(*_args, **_kwargs):
+        raise AssertionError("wait_grid_market_fill should not be called")
+
+    monkeypatch.setattr(
+        "app.services.grid.exchange_orders.wait_grid_market_fill",
+        fail_wait,
+    )
+    ok, filled, avg = execute_grid_market_order(
+        client,
+        symbol="BTC/USD",
+        signal_type="open_long",
+        quantity=0.01,
+        market_type="spot",
+        exchange_config={"exchange_id": "alpaca"},
+    )
+
+    assert ok is True
+    assert filled == 0.006
+    assert avg == 58500.0

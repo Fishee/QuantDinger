@@ -27,9 +27,26 @@ except ImportError:
 
 
 _DEFAULT_WATCHLIST = [
+    # Crypto - USDT pairs
     ("Crypto", "BTC/USDT", "Bitcoin"),
     ("Crypto", "ETH/USDT", "Ethereum"),
     ("Crypto", "SOL/USDT", "Solana"),
+
+    # Crypto - USD pairs for Alpaca
+    ("Crypto", "BTC/USD", "Bitcoin"),
+    ("Crypto", "ETH/USD", "Ethereum"),
+    ("Crypto", "SOL/USD", "Solana"),
+    ("Crypto", "DOGE/USD", "Dogecoin"),
+    ("Crypto", "LTC/USD", "Litecoin"),
+    ("Crypto", "BCH/USD", "Bitcoin Cash"),
+    ("Crypto", "LINK/USD", "Chainlink"),
+    ("Crypto", "AVAX/USD", "Avalanche"),
+    ("Crypto", "UNI/USD", "Uniswap"),
+    ("Crypto", "AAVE/USD", "Aave"),
+    ("Crypto", "SHIB/USD", "Shiba Inu"),
+    ("Crypto", "PEPE/USD", "Pepe"),
+
+    # US Stocks
     ("USStock", "AAPL", "Apple"),
     ("USStock", "NVDA", "NVIDIA"),
     ("USStock", "TSLA", "Tesla"),
@@ -59,10 +76,10 @@ class UserService:
 
     _password_changed_column_ready = False
     BOOTSTRAP_DEFAULT_PASSWORD = '123456'
-    
+
     # Available roles (ordered by privilege level)
     ROLES = ['viewer', 'user', 'manager', 'admin']
-    
+
     # Role permissions mapping
     ROLE_PERMISSIONS = {
         'viewer': ['dashboard', 'view'],
@@ -70,7 +87,7 @@ class UserService:
         'manager': ['dashboard', 'view', 'indicator', 'backtest', 'strategy', 'portfolio', 'settings'],
         'admin': ['dashboard', 'view', 'indicator', 'backtest', 'strategy', 'portfolio', 'settings', 'user_manage', 'credentials'],
     }
-    
+
     def ensure_password_changed_column(self) -> None:
         """Add password_changed_at if missing (idempotent)."""
         if UserService._password_changed_column_ready:
@@ -398,7 +415,7 @@ class UserService:
             salt = os.urandom(16).hex()
             hashed = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
             return f"sha256${salt}${hashed}"
-    
+
     def verify_password(self, password: str, password_hash: str) -> bool:
         """Verify password against hash"""
         if password_hash.startswith('$2b$') or password_hash.startswith('$2a$'):
@@ -419,7 +436,7 @@ class UserService:
             computed = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
             return computed == stored_hash
         return False
-    
+
     def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get user by ID"""
         try:
@@ -469,7 +486,7 @@ class UserService:
         except Exception as e:
             logger.error(f"get_user_by_id failed: {e}")
             return None
-    
+
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user by username (includes password_hash for auth)"""
         try:
@@ -489,7 +506,7 @@ class UserService:
         except Exception as e:
             logger.error(f"get_user_by_username failed: {e}")
             return None
-    
+
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         """Get user by email (includes password_hash for auth)"""
         if not email:
@@ -511,7 +528,7 @@ class UserService:
         except Exception as e:
             logger.error(f"get_user_by_email failed: {e}")
             return None
-    
+
     def authenticate(self, username: str, password: str, update_last_login: bool = True) -> Optional[Dict[str, Any]]:
         """
         Authenticate user with username/email and password.
@@ -520,33 +537,33 @@ class UserService:
         """
         # Try username first
         user = self.get_user_by_username(username)
-        
+
         # If not found, try email (supports both username and email login)
         if not user:
             user = self.get_user_by_email(username)
-        
+
         if not user:
             return None
-        
+
         if user.get('status') != 'active':
             logger.warning(f"Login attempt for disabled user: {username}")
             return None
-        
+
         password_hash = user.get('password_hash', '')
-        
+
         # Check if user has no password (code-login user)
         if not password_hash or password_hash.strip() == '':
             logger.info(f"Password login attempted for code-login user: {username}")
             # Return a special marker to indicate no password set
             # This allows the caller to provide a more specific error message
             return {'_no_password': True, **user}
-        
+
         if not self.verify_password(password, password_hash):
             return None
-        
+
         if update_last_login:
             self.touch_last_login(user['id'])
-        
+
         # Remove password_hash from return value
         user.pop('password_hash', None)
         return user
@@ -571,7 +588,7 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to update last_login_at for user_id={user_id}: {e}")
             return False
-    
+
     def get_token_version(self, user_id: int) -> int:
         """Return the current token version for a user; defaults to 1."""
         try:
@@ -589,7 +606,7 @@ class UserService:
         except Exception as e:
             logger.error(f"get_token_version failed: {e}")
             return 1
-    
+
     def increment_token_version(self, user_id: int) -> int:
         """Increment token version so older tokens become invalid."""
         try:
@@ -604,25 +621,25 @@ class UserService:
                     (user_id,)
                 )
                 db.commit()
-                
+
                 cur.execute(
                     "SELECT token_version FROM qd_users WHERE id = ?",
                     (user_id,)
                 )
                 row = cur.fetchone()
                 cur.close()
-                
+
                 new_version = int(row.get('token_version') or 1) if row else 1
                 logger.info("Incremented token_version for user")
                 return new_version
         except Exception as e:
             logger.error(f"increment_token_version failed: {e}")
             return 1
-    
+
     def create_user(self, data: Dict[str, Any] = None, **kwargs) -> Optional[int]:
         """
         Create a new user.
-        
+
         Args:
             data: dict with user fields, OR use keyword arguments:
                 username: str (required),
@@ -633,7 +650,7 @@ class UserService:
                 status: str (optional, default 'active'),
                 email_verified: bool (optional, default False),
                 referred_by: int (optional, referrer user ID)
-        
+
         Returns:
             New user ID or None if failed
         """
@@ -642,25 +659,25 @@ class UserService:
             data = kwargs
         else:
             data = {**data, **kwargs}
-        
+
         username = (data.get('username') or '').strip()
         password = data.get('password')  # Can be None for code-login users
-        
+
         if not username:
             raise ValueError("Username is required")
-        
+
         if len(username) < 3 or len(username) > 50:
             raise ValueError("Username must be 3-50 characters")
-        
+
         # Password validation only if provided
         if password and len(password) < 6:
             raise ValueError("Password must be at least 6 characters")
-        
+
         # Check if username already exists
         existing = self.get_user_by_username(username)
         if existing:
             raise ValueError("Username already exists")
-        
+
         # Hash password or use empty string for code-login users
         password_hash = self.hash_password(password) if password else ''
         email = (data.get('email') or '').strip() or None
@@ -669,10 +686,10 @@ class UserService:
         status = data.get('status', 'active')
         email_verified = data.get('email_verified', False)
         referred_by = data.get('referred_by')  # Referrer user ID
-        
+
         if role not in self.ROLES:
             role = 'user'
-        
+
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
@@ -687,7 +704,7 @@ class UserService:
                 db.commit()
                 user_id = cur.lastrowid
                 cur.close()
-                
+
                 # For PostgreSQL, get the ID differently
                 if user_id is None:
                     cur = db.cursor()
@@ -695,7 +712,7 @@ class UserService:
                     row = cur.fetchone()
                     user_id = row['id'] if row else None
                     cur.close()
-                
+
                 logger.info(f"Created user: {username} (id={user_id}, referred_by={referred_by})")
 
                 # Seed default watchlist + builtin indicator samples for new users (FTUE)
@@ -717,11 +734,11 @@ class UserService:
         except Exception as e:
             logger.error(f"create_user failed: {e}")
             raise
-    
+
     def update_user(self, user_id: int, data: Dict[str, Any]) -> bool:
         """
         Update user information.
-        
+
         Args:
             user_id: User ID
             data: Fields to update (email, nickname, avatar, role, status)
@@ -729,7 +746,7 @@ class UserService:
         allowed_fields = ['email', 'nickname', 'avatar', 'role', 'status', 'timezone']
         updates = []
         values = []
-        
+
         for field in allowed_fields:
             if field in data:
                 value = data[field]
@@ -744,13 +761,13 @@ class UserService:
                     continue
                 updates.append(f"{field} = ?")
                 values.append(value)
-        
+
         if not updates:
             return False
-        
+
         updates.append("updated_at = NOW()")
         values.append(user_id)
-        
+
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
@@ -762,43 +779,43 @@ class UserService:
         except Exception as e:
             logger.error(f"update_user failed: {e}")
             return False
-    
+
     def change_password(self, user_id: int, old_password: str, new_password: str) -> bool:
         """Change user password (requires old password verification, except for users with no password)"""
         user = self.get_user_by_id(user_id)
         if not user:
             return False
-        
+
         # Get full user with password_hash
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute("SELECT password_hash FROM qd_users WHERE id = ?", (user_id,))
             row = cur.fetchone()
             cur.close()
-            
+
             if not row:
                 return False
-            
+
             password_hash = row.get('password_hash', '')
-            
+
             # If user has no password (code-login user), allow setting password without old password
             if not password_hash or password_hash.strip() == '':
                 logger.info(f"Setting initial password for code-login user: {user_id}")
                 return self.reset_password(user_id, new_password)
-            
+
             # For users with existing password, verify old password
             if not self.verify_password(old_password, password_hash):
                 return False
-        
+
         return self.reset_password(user_id, new_password)
-    
+
     def reset_password(self, user_id: int, new_password: str) -> bool:
         """Reset user password (admin operation, no old password required)"""
         if len(new_password) < 6:
             raise ValueError("Password must be at least 6 characters")
-        
+
         password_hash = self.hash_password(new_password)
-        
+
         try:
             self.ensure_password_changed_column()
             with get_db_connection() as db:
@@ -817,11 +834,11 @@ class UserService:
         except Exception as e:
             logger.error(f"reset_password failed: {e}")
             return False
-    
+
     def update_password(self, user_id: int, new_password: str) -> bool:
         """Alias for reset_password - update user password without old password verification"""
         return self.reset_password(user_id, new_password)
-    
+
     def delete_user(self, user_id: int) -> bool:
         """Delete a user"""
         try:
@@ -834,7 +851,7 @@ class UserService:
         except Exception as e:
             logger.error(f"delete_user failed: {e}")
             return False
-    
+
     @staticmethod
     def _build_user_list_filter(search: str = None, user_id: int = None) -> tuple:
         """WHERE clause + params for admin user list (supports exact user id)."""
@@ -874,18 +891,18 @@ class UserService:
     ) -> Dict[str, Any]:
         """List all users with pagination and optional search"""
         offset = (page - 1) * page_size
-        
+
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                
+
                 where_clause, params = self._build_user_list_filter(search, user_id)
-                
+
                 # Get total count
                 count_sql = f"SELECT COUNT(*) as count FROM qd_users {where_clause}"
                 cur.execute(count_sql, tuple(params))
                 total = cur.fetchone()['count']
-                
+
                 # Get users
                 query_sql = f"""
                     SELECT id, username, email, nickname, avatar, status, role,
@@ -928,7 +945,7 @@ class UserService:
                 cur.execute(query_sql, tuple(params + [page_size, offset]))
                 users = cur.fetchall()
                 cur.close()
-                
+
                 return {
                     'items': users,
                     'total': total,
@@ -992,11 +1009,11 @@ class UserService:
         except Exception as e:
             logger.error(f"list_all_users_for_export failed: {e}")
             return []
-    
+
     def get_user_permissions(self, role: str) -> List[str]:
         """Get permissions for a role"""
         return self.ROLE_PERMISSIONS.get(role, self.ROLE_PERMISSIONS['viewer'])
-    
+
     def ensure_admin_exists(self):
         """
         Ensure at least one admin user exists.
@@ -1009,7 +1026,7 @@ class UserService:
                 cur.execute("SELECT COUNT(*) as count FROM qd_users")
                 count = cur.fetchone()['count']
                 cur.close()
-                
+
                 if count == 0:
                     # Create admin using env credentials
                     from app.config.settings import Config

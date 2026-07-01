@@ -1969,6 +1969,7 @@ class TradingExecutor:
             klines = self._fetch_latest_kline(
                 symbol, timeframe, limit=history_limit, market_category=market_category,
                 exchange_id=kline_exchange_id, market_type=kline_market_type,
+                exchange_config=exchange_config,
             )
             if not klines or len(klines) < 2:
                 _abort_loop(f"failed to fetch K-lines for {market_category}:{symbol} {timeframe} via {kline_exchange_id or 'default'}/{kline_market_type or 'default'} (need at least 2 bars)")
@@ -2218,6 +2219,7 @@ class TradingExecutor:
                     current_price = self._fetch_current_price(
                         exchange, symbol, market_type=market_type, market_category=market_category,
                         exchange_id=kline_exchange_id, kline_market_type=kline_market_type,
+                        exchange_config=exchange_config,
                     )
                     if current_price is None:
                         logger.warning(f"Strategy {strategy_id} failed to fetch current price for {market_category}:{symbol}")
@@ -2239,6 +2241,7 @@ class TradingExecutor:
                         klines = self._fetch_latest_kline(
                             symbol, timeframe, limit=history_limit, market_category=market_category,
                             exchange_id=kline_exchange_id, market_type=kline_market_type,
+                            exchange_config=exchange_config,
                         )
                         try:
                             if klines and len(klines) >= 2:
@@ -3106,6 +3109,7 @@ class TradingExecutor:
         market_category: str = "Crypto",
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Fetch latest K-line data, preferring the service cache when available."""
         try:
@@ -3117,6 +3121,7 @@ class TradingExecutor:
                 before_time=int(time.time()),
                 exchange_id=exchange_id,
                 market_type=market_type,
+                exchange_config=exchange_config,
             )
         except Exception as e:
             logger.error(f"Failed to fetch K-lines for {market_category}:{symbol}: {str(e)}")
@@ -3130,6 +3135,7 @@ class TradingExecutor:
         market_category: str = "Crypto",
         exchange_id: Optional[str] = None,
         kline_market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[float]:
         """Fetch current price from the market data source selected by market_category."""
         mt_key = (kline_market_type or market_type or "").strip().lower()
@@ -3159,7 +3165,11 @@ class TradingExecutor:
             
         try:
             ticker = DataSourceFactory.get_ticker(
-                market_category, symbol, exchange_id=exchange_id, market_type=kline_market_type or market_type
+                market_category,
+                symbol,
+                exchange_id=exchange_id,
+                market_type=kline_market_type or market_type,
+                exchange_config=exchange_config,
             )
             if ticker:
                 price = float(ticker.get('last') or ticker.get('close') or 0)
@@ -5525,6 +5535,7 @@ class TradingExecutor:
         timeframe: str,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Execute a cross-sectional indicator across multiple symbols."""
         try:
@@ -5535,6 +5546,7 @@ class TradingExecutor:
                     klines = self._fetch_latest_kline(
                         kline_symbol, timeframe, limit=200, market_category=market_category,
                         exchange_id=exchange_id, market_type=market_type,
+                        exchange_config=exchange_config,
                     )
                     if klines and len(klines) >= 2:
                         df = self._klines_to_dataframe(klines)
@@ -5757,6 +5769,7 @@ class TradingExecutor:
                 result = self._execute_cross_sectional_indicator(
                     indicator_code, symbol_list, trading_config, market_category, timeframe,
                     exchange_id=kline_exchange_id, market_type=kline_market_type,
+                    exchange_config=exchange_config,
                 )
                 
                 if not result:

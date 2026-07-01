@@ -27,6 +27,7 @@ class KlineService:
         before_time: Optional[int] = None,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         获取K线数据
@@ -39,6 +40,7 @@ class KlineService:
             before_time: 获取此时间之前的数据
             exchange_id: 加密货币运行中策略 — 策略绑定的交易所
             market_type: 加密货币运行中策略 — spot 或 swap
+            exchange_config: 可选，交易所凭据配置
             
         Returns:
             K线数据列表
@@ -60,6 +62,7 @@ class KlineService:
             before_time=before_time,
             exchange_id=exchange_id,
             market_type=market_type,
+            exchange_config=exchange_config,
         )
         
         if klines and not before_time:
@@ -82,6 +85,7 @@ class KlineService:
         force_refresh: bool = False,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        exchange_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         获取实时价格（优先使用 ticker API，降级使用分钟 K 线）
@@ -125,7 +129,11 @@ class KlineService:
         
         try:
             ticker = DataSourceFactory.get_ticker(
-                market, symbol, exchange_id=exchange_id, market_type=market_type
+                market,
+                symbol,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                exchange_config=exchange_config,
             )
             if ticker and ticker.get('last', 0) > 0:
                 result = {
@@ -145,7 +153,13 @@ class KlineService:
         
         try:
             klines = self.get_kline(
-                market, symbol, '1m', 2, exchange_id=exchange_id, market_type=market_type
+                market,
+                symbol,
+                '1m',
+                2,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                exchange_config=exchange_config,
             )
             if klines and len(klines) > 0:
                 latest = klines[-1]
@@ -171,7 +185,15 @@ class KlineService:
             logger.debug(f"1m kline failed for {market}:{symbol}, trying daily: {e}")
         
         try:
-            klines = self.get_kline(market, symbol, '1D', 2)
+            klines = self.get_kline(
+                market,
+                symbol,
+                '1D',
+                2,
+                exchange_id=exchange_id,
+                market_type=market_type,
+                exchange_config=exchange_config,
+            )
             if klines and len(klines) > 0:
                 latest = klines[-1]
                 prev_close = klines[-2]['close'] if len(klines) > 1 else latest.get('open', 0)
@@ -196,4 +218,3 @@ class KlineService:
             logger.error(f"All price sources failed for {market}:{symbol}: {e}")
         
         return result
-
