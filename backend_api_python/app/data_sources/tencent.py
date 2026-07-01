@@ -82,14 +82,14 @@ def fetch_quote(code: str, timeout: int = 8) -> Optional[List[str]]:
     limiter = get_tencent_limiter()
     limiter.wait()
     url = f"https://qt.gtimg.cn/q={c}"
-    resp = requests.get(url, headers=get_request_headers(referer="https://qt.gtimg.cn/"), timeout=timeout)
-    # Tencent quote is often GBK encoded
-    try:
-        resp.encoding = "gbk"
-    except Exception:
-        pass
-
-    text = (resp.text or "").strip()
+    with requests.get(url, headers=get_request_headers(referer="https://qt.gtimg.cn/"), timeout=timeout) as resp:
+        resp.raise_for_status()
+        # Tencent quote is often GBK encoded
+        try:
+            resp.encoding = "gbk"
+        except Exception:
+            pass
+        text = (resp.text or "").strip()
     if not text or "~" not in text:
         return None
 
@@ -209,8 +209,9 @@ def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", time
 
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{c},{period},,,{int(count)},{adj}"}
-    resp = requests.get(url, headers=get_request_headers(referer="https://gu.qq.com/"), params=params, timeout=timeout)
-    data = resp.json() if resp.text else {}
+    with requests.get(url, headers=get_request_headers(referer="https://gu.qq.com/"), params=params, timeout=timeout) as resp:
+        resp.raise_for_status()
+        data = resp.json() if resp.text else {}
     if not isinstance(data, dict) or int(data.get("code", 0)) != 0:
         return []
     root = (data.get("data") or {}).get(c)

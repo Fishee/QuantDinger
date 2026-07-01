@@ -29,6 +29,8 @@ DEFAULT_USER_ID = 1
 _monitor_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 
+MAX_ALERTS_PER_MONITOR_TICK = 300
+
 
 
 def _now_ts() -> int:
@@ -1274,6 +1276,7 @@ def _check_position_alerts():
         kline_service = KlineService()
         notifier = SignalNotifier()
         now = datetime.now(timezone.utc)
+        price_cache: Dict[str, float] = {}
         
         with get_db_connection() as db:
             cur = db.cursor()
@@ -1286,10 +1289,19 @@ def _check_position_alerts():
                 FROM qd_position_alerts a
                 LEFT JOIN qd_manual_positions p ON a.position_id = p.id
                 WHERE a.is_active = 1
+                ORDER BY a.updated_at ASC, a.id ASC
+                LIMIT ?
                 """
+                ,
+                (MAX_ALERTS_PER_MONITOR_TICK,),
             )
             alerts = cur.fetchall() or []
             cur.close()
+        if len(alerts) >= MAX_ALERTS_PER_MONITOR_TICK:
+            logger.warning(
+                "Position alert check reached per-tick limit=%s; remaining alerts will be checked in later ticks",
+                MAX_ALERTS_PER_MONITOR_TICK,
+            )
         
         for alert in alerts:
             try:
@@ -1320,9 +1332,15 @@ def _check_position_alerts():
                 # Get current price (use realtime price API)
                 current_price = 0
                 try:
-                    price_data = kline_service.get_realtime_price(market, symbol)
-                    current_price = float(price_data.get('price') or 0)
+                    price_key = f"{str(market or '').strip().lower()}:{str(symbol or '').strip().upper()}"
+                    if price_key in price_cache:
+                        current_price = price_cache[price_key]
+                    else:
+                        price_data = kline_service.get_realtime_price(market, symbol)
+                        current_price = float(price_data.get('price') or 0)
+                        price_cache[price_key] = current_price
                 except Exception:
+                    price_cache[price_key] = 0
                     continue
                 
                 if current_price <= 0:
