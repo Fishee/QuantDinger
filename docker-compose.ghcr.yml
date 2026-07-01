@@ -38,13 +38,14 @@
 
 services:
   postgres:
-    image: ${IMAGE_PREFIX:-}postgres:16-alpine
+    image: ${POSTGRES_IMAGE:-${IMAGE_PREFIX:-}postgres:18.3-alpine}
     container_name: quantdinger-db
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-quantdinger}
       POSTGRES_USER: ${POSTGRES_USER:-quantdinger}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quantdinger123}
+      PGDATA: ${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
       TZ: ${TZ:-Asia/Shanghai}
     command:
       - "postgres"
@@ -53,7 +54,7 @@ services:
       - "-c"
       - "shared_buffers=${PG_SHARED_BUFFERS:-256MB}"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_SOURCE:-postgres_data}:${POSTGRES_PGDATA:-/var/lib/postgresql/18/docker}
     ports:
       - "${DB_PORT:-127.0.0.1:5432}:5432"
     networks:
