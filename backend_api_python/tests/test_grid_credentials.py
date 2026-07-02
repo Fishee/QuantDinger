@@ -55,6 +55,88 @@ def test_grid_startup_fails_before_initial_market_when_client_missing():
     assert calls["market"] == 0
 
 
+def test_grid_startup_rejects_alpaca_crypto_amount_per_grid_below_min_before_initial_market():
+    calls = {"market": 0, "client": 0}
+
+    def _enqueue(sig, usdt, px, reason):
+        calls["market"] += 1
+        return True
+
+    def _create_client():
+        calls["client"] += 1
+        raise AssertionError("client should not be created for invalid Alpaca grid notional")
+
+    runner = GridRestingRunner(
+        11,
+        "BTC/USD",
+        {
+            "leverage": 1,
+            "market_type": "spot",
+            "market_category": "Crypto",
+            "initial_capital": 100,
+            "bot_params": {
+                "upperPrice": 66000,
+                "lowerPrice": 58000,
+                "gridCount": 17,
+                "amountPerGrid": 5,
+                "gridDirection": "long",
+                "initialPositionPct": 25,
+            },
+        },
+        {"exchange_id": "alpaca", "market_type": "spot", "market_category": "Crypto"},
+        user_id=1,
+        initial_capital=100,
+        enqueue_market_fn=_enqueue,
+        create_client_fn=_create_client,
+    )
+
+    ok, msg = runner.startup(60571.4)
+
+    assert ok is False
+    assert "Alpaca crypto spot" in msg
+    assert "amountPerGrid" in msg
+    assert "10.00 USD" in msg
+    assert calls == {"market": 0, "client": 0}
+
+
+def test_grid_startup_allows_alpaca_crypto_amount_per_grid_above_min_then_checks_client():
+    calls = {"client": 0}
+
+    def _create_client():
+        calls["client"] += 1
+        raise RuntimeError("next startup check")
+
+    runner = GridRestingRunner(
+        12,
+        "BTC/USD",
+        {
+            "leverage": 1,
+            "market_type": "spot",
+            "market_category": "Crypto",
+            "initial_capital": 100,
+            "bot_params": {
+                "upperPrice": 66000,
+                "lowerPrice": 58000,
+                "gridCount": 17,
+                "amountPerGrid": 11,
+                "gridDirection": "long",
+                "initialPositionPct": 0,
+            },
+        },
+        {"exchange_id": "alpaca", "market_type": "spot", "market_category": "Crypto"},
+        user_id=1,
+        initial_capital=100,
+        enqueue_market_fn=lambda *a, **k: True,
+        create_client_fn=_create_client,
+    )
+
+    ok, msg = runner.startup(60571.4)
+
+    assert ok is False
+    assert "next startup check" in msg
+    assert calls["client"] == 1
+
+
 def test_grid_startup_places_limits_when_client_ok():
     calls = {"limits": 0}
 

@@ -447,6 +447,197 @@ def test_sync_exit_coverage_places_long_exit_for_uncovered_position(monkeypatch)
     assert placed[0]["price"] > 676.8 - 20  # active cell upper near current price
 
 
+def test_grid_spot_long_exit_clamps_to_alpaca_available_balance(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services.alpaca_trading.client import AlpacaClient
+    from app.services.grid.engine import GridEngine
+
+    class FakeAlpaca(AlpacaClient):
+        def __init__(self):
+            pass
+
+        def get_positions(self):
+            return [{"symbol": "BTC/USD", "qty": "0.000165443"}]
+
+        def get_open_orders(self):
+            return []
+
+    class FakeOrders:
+        def list_open(self, strategy_id):
+            return []
+
+        def insert(self, row):
+            return 1
+
+    class FakeCells:
+        def list_cells(self, strategy_id, symbol):
+            return []
+
+        def update_state(self, *args, **kwargs):
+            pass
+
+    tc = {
+        "initial_capital": 100,
+        "leverage": 1,
+        "market_type": "spot",
+        "bot_params": {
+            "upperPrice": 66000,
+            "lowerPrice": 58000,
+            "gridCount": 17,
+            "amountPerGrid": 11,
+            "gridDirection": "long",
+            "initialPositionPct": 0,
+        },
+    }
+    captured = {}
+
+    def fake_place_grid_limit_order(client, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(exchange_order_id="alp-ex-1")
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *a, **k: None)
+    monkeypatch.setattr("app.services.grid.engine.place_grid_limit_order", fake_place_grid_limit_order)
+
+    engine = GridEngine(
+        91,
+        "BTC/USD",
+        tc,
+        {"exchange_id": "alpaca", "market_type": "spot", "market_category": "Crypto"},
+        create_client_fn=lambda: FakeAlpaca(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._orders = FakeOrders()
+    engine._cells = FakeCells()
+
+    ok = engine._place_limit(
+        SimpleNamespace(index=3),
+        "long_exit",
+        "sell",
+        60600.0,
+        reduce_only=True,
+        pos_side="long",
+        quantity=0.000165692,
+    )
+
+    assert ok is True
+    assert captured["quantity"] == pytest.approx(0.000165443)
+    assert captured["side"] == "sell"
+
+
+def test_grid_limit_order_logs_signal_level(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services.grid.engine import GridEngine
+
+    tc = {
+        "initial_capital": 100,
+        "leverage": 1,
+        "market_type": "spot",
+        "bot_params": {
+            "upperPrice": 66000,
+            "lowerPrice": 58000,
+            "gridCount": 17,
+            "amountPerGrid": 11,
+            "gridDirection": "long",
+            "initialPositionPct": 0,
+        },
+    }
+    logs = []
+
+    class FakeOrders:
+        def list_open(self, strategy_id):
+            return []
+
+        def insert(self, row):
+            return 1
+
+    class FakeCells:
+        def update_state(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *args: logs.append(args))
+    monkeypatch.setattr(
+        "app.services.grid.engine.place_grid_limit_order",
+        lambda *a, **k: SimpleNamespace(exchange_order_id="ex-1"),
+    )
+
+    engine = GridEngine(
+        92,
+        "BTC/USD",
+        tc,
+        {"exchange_id": "alpaca", "market_type": "spot", "market_category": "Crypto"},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._orders = FakeOrders()
+    engine._cells = FakeCells()
+
+    assert engine._place_limit(
+        SimpleNamespace(index=4),
+        "long_entry",
+        "buy",
+        59882.35,
+        reduce_only=False,
+        pos_side="long",
+        quantity=0.000175,
+    ) is True
+
+    assert any(level == "signal" and "Grid limit long_entry" in msg for _sid, level, msg in logs)
+
+
+def test_grid_fill_logs_trade_level(monkeypatch):
+    from app.services.grid.engine import GridEngine
+    from app.services.grid.levels import GridCellSpec
+    from app.services.grid.resting_orders_repo import GridRestingOrder
+
+    tc = {"market_type": "spot", "bot_params": {"gridDirection": "long", "gridCount": 5}}
+    logs = []
+    cell = GridCellSpec(index=4, lower_price=59882.35, upper_price=60352.94)
+    order = GridRestingOrder(
+        strategy_id=93,
+        symbol="BTC/USD",
+        cell_index=4,
+        purpose="long_exit",
+        side="sell",
+        pos_side="long",
+        price=60352.94,
+        quantity=0.000175,
+    )
+
+    class FakeCells:
+        def update_state(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *args: logs.append(args))
+    monkeypatch.setattr(
+        "app.services.grid.fill_handler.apply_grid_fill_to_local_state",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._levels_and_cells",
+        lambda self: ([], [cell]),
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._cell_allows_entry",
+        lambda *a, **k: False,
+    )
+
+    engine = GridEngine(
+        93,
+        "BTC/USD",
+        tc,
+        {},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._cells = FakeCells()
+
+    engine.on_order_filled(order, 0.000175, 60352.94)
+
+    assert any(level == "trade" and "Grid fill long_exit" in msg for _sid, level, msg in logs)
+
+
 def test_sync_exit_coverage_skips_when_exits_already_cover_position(monkeypatch):
     from app.services.grid.engine import GridEngine
     from app.services.grid.resting_orders_repo import GridRestingOrder
@@ -1192,4 +1383,3 @@ def test_grid_fill_profit_uses_cell_entry_price(monkeypatch):
     assert captured["profit"] == pytest.approx(expected)
     assert captured["grid_matched_profit"] == pytest.approx(expected)
     assert captured["matched_entry_price"] == pytest.approx(669.3)
-

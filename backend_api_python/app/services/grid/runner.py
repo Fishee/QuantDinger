@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.services.grid.config import GridBotConfig
 from app.services.grid.engine import GridEngine
@@ -14,8 +14,57 @@ from app.utils.strategy_runtime_logs import append_strategy_log
 
 logger = get_logger(__name__)
 
+ALPACA_CRYPTO_MIN_ORDER_NOTIONAL_USD = 10.0
+
 # Active runners for fill poller
 _ACTIVE_RUNNERS: Dict[int, "GridRestingRunner"] = {}
+
+
+def validate_alpaca_crypto_spot_grid_notional(
+    cfg: GridBotConfig,
+    *,
+    exchange_config: Dict[str, Any],
+    trading_config: Dict[str, Any],
+    symbol: str,
+    current_price: float = 0.0,
+) -> Tuple[bool, str]:
+    """Alpaca crypto spot rejects orders with cost basis below 10 USD."""
+    ex_cfg = exchange_config if isinstance(exchange_config, dict) else {}
+    tc = trading_config if isinstance(trading_config, dict) else {}
+    exchange_id = str(ex_cfg.get("exchange_id") or ex_cfg.get("exchangeId") or "").strip().lower()
+    if exchange_id != "alpaca":
+        return True, ""
+    if str(cfg.market_type or "").strip().lower() != "spot":
+        return True, ""
+
+    market_hint = str(
+        tc.get("market_category")
+        or tc.get("market")
+        or ex_cfg.get("market_category")
+        or ex_cfg.get("market")
+        or ""
+    ).strip().lower()
+    looks_crypto = "/" in str(symbol or "")
+    if market_hint not in ("crypto", "cryptocurrency") and not looks_crypto:
+        return True, ""
+
+    max_px = max(
+        abs(float(cfg.upper_price or 0.0)),
+        abs(float(cfg.lower_price or 0.0)),
+        abs(float(current_price or 0.0)),
+    )
+    precision_buffer = max(0.01, max_px * 1e-9 * 2.0)
+    required = ALPACA_CRYPTO_MIN_ORDER_NOTIONAL_USD + precision_buffer
+    amount = float(cfg.amount_per_grid or 0.0)
+    if amount + 1e-12 >= required:
+        return True, ""
+    return (
+        False,
+        "Alpaca crypto spot requires each grid order cost basis >= "
+        f"{ALPACA_CRYPTO_MIN_ORDER_NOTIONAL_USD:.2f} USD. "
+        f"amountPerGrid={amount:.4f} is too small; set amountPerGrid to at least "
+        f"{required:.2f} USD or reduce gridCount/increase capital.",
+    )
 
 
 def register_runner(runner: "GridRestingRunner") -> None:
@@ -140,6 +189,15 @@ class GridRestingRunner:
         )
         if not ok:
             return False, msg
+        ok_alpaca, msg_alpaca = validate_alpaca_crypto_spot_grid_notional(
+            cfg,
+            exchange_config=self.exchange_config,
+            trading_config=self.trading_config,
+            symbol=self.symbol,
+            current_price=current_price,
+        )
+        if not ok_alpaca:
+            return False, msg_alpaca
         for w in warnings:
             append_strategy_log(self.strategy_id, "warning", f"Grid config: {w}")
         bp = self.trading_config.get("bot_params") if isinstance(self.trading_config.get("bot_params"), dict) else {}

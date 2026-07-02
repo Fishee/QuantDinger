@@ -5,6 +5,7 @@ from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.spot_sizing import (
     clamp_spot_close_quantity,
+    get_spot_free_base_balance,
     prepare_spot_live_order_sizes,
     scale_spot_open_notional,
 )
@@ -48,3 +49,19 @@ def test_clamp_spot_close_no_change_when_within_free():
     final, meta = clamp_spot_close_quantity(client, symbol="ETH/USDT", requested_qty=0.5, safety_ratio=1.0)
     assert final == 0.5
     assert "adjusted" not in meta or meta.get("adjusted") is not True
+
+
+def test_alpaca_spot_free_base_balance_uses_positions_minus_open_sells():
+    from app.services.alpaca_trading.client import AlpacaClient
+
+    class FakeAlpaca(AlpacaClient):
+        def __init__(self):
+            pass
+
+        def get_positions(self):
+            return [{"symbol": "BTC/USD", "qty": "0.000165443", "avg_entry_price": "60571"}]
+
+        def get_open_orders(self):
+            return [{"symbol": "BTC/USD", "side": "sell", "qty": "0.000010000", "filled": "0"}]
+
+    assert abs(get_spot_free_base_balance(FakeAlpaca(), symbol="BTC/USD") - 0.000155443) < 1e-12

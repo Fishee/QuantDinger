@@ -237,7 +237,7 @@ class GridEngine:
         )
         append_strategy_log(
             self.strategy_id,
-            "info",
+            "trade",
             f"Grid initial market recovered from client order: {filled:.6f} @ {px:.4f}",
         )
         return True
@@ -289,7 +289,7 @@ class GridEngine:
         )
         append_strategy_log(
             self.strategy_id,
-            "info",
+            "trade",
             f"Grid initial market recovered from exchange: {record_qty:.6f} {pos_side} @ ~{current_price:.4f}",
         )
         self._initial_done = True
@@ -362,7 +362,7 @@ class GridEngine:
         )
         append_strategy_log(
             self.strategy_id,
-            "info",
+            "trade",
             f"Grid initial market {signal_type}: filled {filled:.6f} @ {avg:.4f}",
         )
         return True
@@ -870,7 +870,7 @@ class GridEngine:
         if ok:
             append_strategy_log(
                 self.strategy_id,
-                "info",
+                "signal",
                 f"Grid active-cell exit {purpose} cell={target_cell.index} @ {px:.4f} "
                 f"qty={grid_qty:.6f} (one grid; pos={pos_qty:.6f})",
             )
@@ -927,6 +927,40 @@ class GridEngine:
         coid = make_grid_client_order_id(self.strategy_id, cell.index, purpose)
         try:
             client = self._create_client()
+            if (
+                reduce_only
+                and str(self.cfg.market_type or "").strip().lower() == "spot"
+                and side.strip().lower() == "sell"
+            ):
+                try:
+                    from app.services.alpaca_trading import AlpacaClient
+                    from app.services.live_trading.spot_sizing import clamp_spot_close_quantity
+
+                    if isinstance(client, AlpacaClient):
+                        clamped_qty, meta = clamp_spot_close_quantity(
+                            client,
+                            symbol=self.symbol,
+                            requested_qty=qty,
+                            safety_ratio=1.0,
+                        )
+                        if clamped_qty <= 0:
+                            append_strategy_log(
+                                self.strategy_id,
+                                "warning",
+                                f"Grid spot exit skipped {purpose}: no free base balance "
+                                f"(requested={qty:.9f})",
+                            )
+                            return False
+                        if clamped_qty < qty:
+                            append_strategy_log(
+                                self.strategy_id,
+                                "info",
+                                f"Grid spot exit qty adjusted {purpose}: {qty:.9f} -> {clamped_qty:.9f} "
+                                f"(free={float((meta or {}).get('exchange_free') or 0.0):.9f})",
+                            )
+                            qty = clamped_qty
+                except Exception as e:
+                    logger.debug("grid spot exit qty clamp sid=%s: %s", self.strategy_id, e)
             # Exit (reduce-only) orders may need to cross when price is above/below the grid line.
             post_only = (
                 not reduce_only
@@ -1011,7 +1045,7 @@ class GridEngine:
             )
             append_strategy_log(
                 self.strategy_id,
-                "info",
+                "signal",
                 f"Grid limit {purpose} {side} cell={cell.index} @ {px:.4f} qty={qty:.6f}",
             )
             self._consecutive_order_errors = 0
@@ -1046,7 +1080,7 @@ class GridEngine:
         px = float(avg_price or order.price or 0)
         append_strategy_log(
             self.strategy_id,
-            "info",
+            "trade",
             f"Grid fill {purpose} cell={order.cell_index} qty={fq:.6f} @ {px:.4f}",
         )
         if self._paused_entries or self._runtime_params.get("waterfall_pause"):

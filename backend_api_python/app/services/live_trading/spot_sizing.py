@@ -235,6 +235,43 @@ def get_spot_base_holding(client: BaseRestClient, *, symbol: str) -> Dict[str, f
     except Exception as e:
         logger.warning("spot base holding (kraken): %s", e)
 
+    try:
+        from app.services.alpaca_trading import AlpacaClient
+
+        if isinstance(client, AlpacaClient):
+            base, quote = _split_base_quote(str(symbol or ""))
+            want_compact = f"{base}{quote}".replace("/", "").upper()
+            rows = client.get_positions() or []
+            if not isinstance(rows, list):
+                rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                row_symbol = str(row.get("symbol") or row.get("asset") or "").replace("/", "").replace("-", "").upper()
+                if row_symbol != want_compact and row_symbol != base_u:
+                    continue
+                qty = _pick_free_from_row(row, "available", "available_qty", "qty_available", "quantity", "qty")
+                if qty <= 0:
+                    continue
+                reserved = 0.0
+                try:
+                    for order in client.get_open_orders() or []:
+                        if not isinstance(order, dict):
+                            continue
+                        order_symbol = str(order.get("symbol") or "").replace("/", "").replace("-", "").upper()
+                        side = str(order.get("side") or order.get("action") or "").strip().lower()
+                        if order_symbol != want_compact or side != "sell":
+                            continue
+                        order_qty = _pick_free_from_row(order, "quantity", "qty")
+                        filled_qty = _pick_free_from_row(order, "filled", "filled_qty")
+                        reserved += max(0.0, order_qty - filled_qty)
+                except Exception as e:
+                    logger.debug("spot base holding (alpaca open orders): %s", e)
+                avg_cost = _pick_cost_from_row(row, "avgCost", "avg_entry_price", "avg_price", "avgPrice")
+                return _spot_holding(qty, max(0.0, qty - reserved), avg_cost)
+    except Exception as e:
+        logger.warning("spot base holding (alpaca): %s", e)
+
     return {"total": 0.0, "available": 0.0, "avg_cost": 0.0}
 
 
@@ -408,4 +445,3 @@ def clamp_spot_close_quantity(
             ratio,
         )
     return max(0.0, final), meta
-

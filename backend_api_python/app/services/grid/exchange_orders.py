@@ -203,6 +203,12 @@ def place_grid_limit_order(
     if AlpacaClient is not None and isinstance(client, AlpacaClient):
         if mt != "spot":
             raise LiveTradingError("Alpaca grid trading supports spot only")
+        notional = qty * px
+        if notional < 10.0:
+            raise LiveTradingError(
+                "Alpaca crypto spot minimum order cost basis is 10 USD; "
+                f"grid order notional is {notional:.4f} USD. Increase amountPerGrid."
+            )
         result = client.place_limit_order(
             symbol=str(symbol),
             side=sd,
