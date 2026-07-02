@@ -95,8 +95,48 @@ def test_alpaca_crypto_source_maps_hour_and_day_timeframes(monkeypatch):
     source = AlpacaCryptoDataSource({"api_key": "key", "secret_key": "secret"})
 
     assert source.get_kline("BTC/USD", "1h", 1)
+    assert source.get_kline("BTC/USD", "4h", 1)
     assert source.get_kline("BTC/USD", "1d", 1)
-    assert seen_timeframes == ["1Hour", "1Day"]
+    assert seen_timeframes == ["1Hour", "4Hour", "1Day"]
+
+
+def test_alpaca_crypto_source_falls_back_to_hourly_for_4h(monkeypatch):
+    seen = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.append(dict(params or {}))
+        if params["timeframe"] == "4Hour":
+            return _FakeResponse({"message": "unsupported timeframe"}, status_code=400, text="unsupported")
+        bars = []
+        base_ts = 1_800_000_000
+        for i in range(8):
+            bars.append(
+                {
+                    "t": base_ts + i * 3600,
+                    "o": 100 + i,
+                    "h": 101 + i,
+                    "l": 99 + i,
+                    "c": 100.5 + i,
+                    "v": 1 + i,
+                }
+            )
+        return _FakeResponse({"bars": {"BTC/USD": bars}})
+
+    monkeypatch.setattr("app.data_sources.alpaca_crypto.requests.get", fake_get)
+    source = AlpacaCryptoDataSource({"api_key": "key", "secret_key": "secret"})
+
+    rows = source.get_kline("BTC/USD", "4h", 2)
+
+    assert [call["timeframe"] for call in seen] == ["4Hour", "1Hour"]
+    assert seen[1]["limit"] == 8
+    assert len(rows) == 2
+    assert rows[0]["open"] == 100.0
+    assert rows[0]["high"] == 104.0
+    assert rows[0]["low"] == 99.0
+    assert rows[0]["close"] == 103.5
+    assert rows[0]["volume"] == 10.0
+    assert rows[1]["open"] == 104.0
+    assert rows[1]["close"] == 107.5
 
 
 def test_alpaca_crypto_source_request_failure_returns_empty(monkeypatch):
