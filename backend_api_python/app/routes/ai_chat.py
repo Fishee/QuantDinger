@@ -2395,7 +2395,11 @@ def chat_message_stream():
             logger.error(f"chat_message_stream failed: {e}", exc_info=True)
             yield _sse("error", {"msg": str(e), "session_id": sid, "costs": costs})
 
-    return Response(generate(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return Response(generate(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
 
 
 @ai_chat_blp.route("/chat/sessions", methods=["GET"])
