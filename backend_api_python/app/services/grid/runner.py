@@ -144,15 +144,15 @@ class GridRestingRunner:
     ) -> None:
         self.strategy_id = int(strategy_id)
         self.user_id = int(user_id or 1)
-        self.symbol = str(symbol or "")
         self.trading_config = dict(trading_config or {})
-        self.trading_config["initial_capital"] = float(initial_capital or 0)
         self.exchange_config = dict(exchange_config or {})
+        self.symbol = str(symbol or "")
+        self.trading_config["initial_capital"] = float(initial_capital or 0)
         self._risk_exit_fn = risk_exit_fn
         self._runtime_params: Dict[str, Any] = {}
         self._engine = GridEngine(
             strategy_id,
-            symbol,
+            self.symbol,
             self.trading_config,
             self.exchange_config,
             create_client_fn=create_client_fn,

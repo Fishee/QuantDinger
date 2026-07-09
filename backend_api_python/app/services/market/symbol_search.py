@@ -17,6 +17,27 @@ logger = get_logger(__name__)
 SYMBOL_SEARCH_CACHE_TTL_SEC = 21600
 _market_cache = CacheManager()
 _crypto_markets_cache: dict = {"data": None, "ts": 0}
+CRYPTO_SEARCH_QUOTES = ("USDT", "USDC")
+CRYPTO_USDC_HOT_SYMBOLS = (
+    {"market": "Crypto", "symbol": "BTC/USDC", "name": "Bitcoin"},
+    {"market": "Crypto", "symbol": "ETH/USDC", "name": "Ethereum"},
+    {"market": "Crypto", "symbol": "SOL/USDC", "name": "Solana"},
+    {"market": "Crypto", "symbol": "BNB/USDC", "name": "BNB"},
+)
+CRYPTO_FALLBACK_BASE_NAMES = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "BNB": "BNB",
+    "SOL": "Solana",
+    "XRP": "XRP",
+    "ADA": "Cardano",
+    "DOGE": "Dogecoin",
+    "AVAX": "Avalanche",
+    "LINK": "Chainlink",
+    "DOT": "Polkadot",
+    "TRX": "TRON",
+    "LTC": "Litecoin",
+}
 
 
 def dedupe_symbol_results(items: Iterable[dict], limit: int) -> list:
@@ -51,7 +72,7 @@ def search_market_symbols(market: str, keyword: str, limit: int = 20) -> list:
         seed_search_symbols(market=market, keyword=keyword, limit=limit),
         limit,
     )
-    if out:
+    if out and market != "Crypto":
         return out
 
     existing = {r["symbol"] for r in out}
@@ -90,7 +111,12 @@ def find_market_symbol(market: str, symbol: str) -> dict | None:
 
 def get_hot_symbols(market: str, limit: int = 10) -> list:
     """Return curated hot symbols for a market."""
-    return seed_get_hot_symbols(market=(market or "").strip(), limit=int(limit or 10))
+    market = (market or "").strip()
+    limit = max(1, int(limit or 10))
+    rows = seed_get_hot_symbols(market=market, limit=limit)
+    if market == "Crypto":
+        rows = _with_crypto_usdc_hot(rows, limit)
+    return dedupe_symbol_results(rows, limit)
 
 
 def _first_exact_match(items: Iterable[dict], market: str, symbol: str) -> dict | None:
@@ -108,10 +134,76 @@ def _first_exact_match(items: Iterable[dict], market: str, symbol: str) -> dict 
     return None
 
 
-def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
-    """Search exchange markets for active USDT crypto pairs."""
+def _crypto_search_key(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def _split_crypto_search_pair(keyword: str) -> tuple[str, str]:
+    raw = str(keyword or "").strip().upper()
+    if ":" in raw:
+        raw = raw.split(":", 1)[0]
+    raw = raw.replace("-", "/")
+    if "/" in raw:
+        base, quote = raw.split("/", 1)
+        base = _crypto_search_key(base)
+        quote = _crypto_search_key(quote)
+        if base and quote in CRYPTO_SEARCH_QUOTES:
+            return base, quote
+    compact = _crypto_search_key(raw)
+    for quote in CRYPTO_SEARCH_QUOTES:
+        if compact.endswith(quote) and len(compact) > len(quote):
+            base = compact[:-len(quote)]
+            if base:
+                return base, quote
+    return "", ""
+
+
+def _with_crypto_usdc_hot(rows: list, limit: int) -> list:
     if limit <= 0:
         return []
+    rows = list(rows or [])
+    if any(str(r.get("symbol") or "").strip().upper().endswith("/USDC") for r in rows[:limit]):
+        return rows
+    reserve = min(len(CRYPTO_USDC_HOT_SYMBOLS), limit // 4)
+    if reserve <= 0:
+        return rows
+    return rows[: max(0, limit - reserve)] + list(CRYPTO_USDC_HOT_SYMBOLS[:reserve])
+
+
+def _synthetic_crypto_pair_results(keyword: str, limit: int, existing: set) -> list:
+    if limit <= 0:
+        return []
+    existing = set(existing or set())
+    base, quote = _split_crypto_search_pair(keyword)
+    if base and quote:
+        bases = [base] if base in CRYPTO_FALLBACK_BASE_NAMES else []
+        quotes = [quote]
+    else:
+        kw = _crypto_search_key(keyword)
+        bases = [
+            b for b, name in CRYPTO_FALLBACK_BASE_NAMES.items()
+            if kw and (kw in b or kw in _crypto_search_key(name))
+        ]
+        quotes = list(CRYPTO_SEARCH_QUOTES)
+
+    out = []
+    for b in bases:
+        for q in quotes:
+            symbol = f"{b}/{q}"
+            if symbol in existing:
+                continue
+            out.append({"market": "Crypto", "symbol": symbol, "name": CRYPTO_FALLBACK_BASE_NAMES.get(b, b)})
+            existing.add(symbol)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
+    """Search exchange markets for active USDT/USDC crypto pairs."""
+    if limit <= 0:
+        return []
+    results = []
     try:
         import ccxt  # type: ignore
         from app.config.data_sources import CCXTConfig
@@ -125,31 +217,37 @@ def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
             ex.load_markets()
             markets = []
             for sym, info in ex.markets.items():
-                if not info.get("active") or info.get("quote", "") != "USDT":
+                quote = str(info.get("quote") or "").upper()
+                if not info.get("active") or quote not in CRYPTO_SEARCH_QUOTES:
+                    continue
+                symbol = str(info.get("symbol") or sym or "").upper()
+                if ":" in symbol:
                     continue
                 markets.append({
-                    "symbol": sym,
-                    "base": info.get("base", ""),
-                    "name": info.get("base", sym),
+                    "symbol": symbol,
+                    "base": str(info.get("base") or "").upper(),
+                    "quote": quote,
+                    "name": info.get("base", symbol),
                 })
             _crypto_markets_cache["data"] = markets
             _crypto_markets_cache["ts"] = now
-            logger.info("Cached %d USDT crypto pairs from %s", len(markets), CCXTConfig.DEFAULT_EXCHANGE)
+            logger.info("Cached %d USDT/USDC crypto pairs from %s", len(markets), CCXTConfig.DEFAULT_EXCHANGE)
 
-        kw = keyword.upper().replace("/USDT", "").replace("/", "")
-        results = []
+        kw = _crypto_search_key(keyword)
         for item in markets:
             symbol = item["symbol"]
             if symbol in existing:
                 continue
-            if kw in item["base"].upper() or kw in symbol.upper():
+            if kw in _crypto_search_key(item["base"]) or kw in _crypto_search_key(symbol):
                 results.append({"market": "Crypto", "symbol": symbol, "name": item["name"]})
+                existing.add(symbol)
                 if len(results) >= limit:
                     break
-        return results
     except Exception as exc:
         logger.debug("Crypto exchange symbol search failed: %s", exc)
-        return []
+    if len(results) < limit:
+        results.extend(_synthetic_crypto_pair_results(keyword, limit - len(results), existing))
+    return results[:limit]
 
 
 def _df_records(df) -> list:
@@ -267,4 +365,3 @@ def _search_external_symbols(market: str, keyword: str, limit: int, existing: se
     if rows:
         _market_cache.set(cache_key, rows, SYMBOL_SEARCH_CACHE_TTL_SEC)
     return [r for r in rows if r.get("symbol") not in existing][:limit]
-

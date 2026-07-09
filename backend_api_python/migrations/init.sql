@@ -925,9 +925,13 @@ INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_acti
 ('USStock', 'JNJ', 'Johnson & Johnson', 'NYSE', 'USD', 1, 1, 91),
 -- Crypto (major + popular altcoins)
 ('Crypto', 'BTC/USDT', 'Bitcoin', 'Binance', 'USDT', 1, 1, 100),
+('Crypto', 'BTC/USDC', 'Bitcoin', 'Binance', 'USDC', 1, 1, 99),
 ('Crypto', 'ETH/USDT', 'Ethereum', 'Binance', 'USDT', 1, 1, 99),
+('Crypto', 'ETH/USDC', 'Ethereum', 'Binance', 'USDC', 1, 1, 98),
 ('Crypto', 'BNB/USDT', 'BNB', 'Binance', 'USDT', 1, 1, 98),
+('Crypto', 'BNB/USDC', 'BNB', 'Binance', 'USDC', 1, 1, 97),
 ('Crypto', 'SOL/USDT', 'Solana', 'Binance', 'USDT', 1, 1, 97),
+('Crypto', 'SOL/USDC', 'Solana', 'Binance', 'USDC', 1, 1, 96),
 ('Crypto', 'XRP/USDT', 'Ripple', 'Binance', 'USDT', 1, 1, 96),
 ('Crypto', 'ADA/USDT', 'Cardano', 'Binance', 'USDT', 1, 1, 95),
 ('Crypto', 'DOGE/USDT', 'Dogecoin', 'Binance', 'USDT', 1, 1, 94),

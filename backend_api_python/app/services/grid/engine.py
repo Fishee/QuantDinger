@@ -75,13 +75,16 @@ class GridEngine:
         if self._stop_requested:
             return
         msg = str(exc or "")
+        ex_id = str((self.exchange_config or {}).get("exchange_id") or "").strip().lower() or "unknown"
+        ctx = f"exchange={ex_id} symbol={self.symbol} market_type={self.cfg.market_type}"
         logger.warning(
-            "Grid place limit failed sid=%s cell purpose=%s: %s",
+            "Grid place limit failed sid=%s cell purpose=%s %s: %s",
             self.strategy_id,
             purpose,
+            ctx,
             msg,
         )
-        append_strategy_log(self.strategy_id, "error", f"Grid limit failed {purpose}: {msg}")
+        append_strategy_log(self.strategy_id, "error", f"Grid limit failed {purpose}: {msg} ({ctx})")
         self._consecutive_order_errors += 1
         try:
             from app.services.strategy_lifecycle import maybe_auto_stop_on_exchange_error

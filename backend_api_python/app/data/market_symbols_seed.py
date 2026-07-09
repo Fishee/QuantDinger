@@ -237,6 +237,7 @@ def get_symbol_name(market: str, symbol: str) -> Optional[str]:
     candidate_symbols = [s]
     if m == 'Crypto' and '/' not in s:
         candidate_symbols.append(f"{s}/USDT")
+        candidate_symbols.append(f"{s}/USDC")
 
     try:
         with _get_db_connection() as db:

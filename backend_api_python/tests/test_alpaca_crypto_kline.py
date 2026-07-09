@@ -62,7 +62,9 @@ def test_alpaca_crypto_source_formats_and_sorts_bars(monkeypatch):
     assert calls["url"] == AlpacaCryptoDataSource.API_URL
     assert calls["params"]["symbols"] == "BTC/USD"
     assert calls["params"]["timeframe"] == "1Min"
-    assert calls["params"]["limit"] == 5
+    assert calls["params"]["limit"] == 20
+    assert "start" in calls["params"]
+    assert "end" in calls["params"]
     assert calls["headers"]["APCA-API-KEY-ID"] == "key"
     assert calls["headers"]["APCA-API-SECRET-KEY"] == "secret"
     assert [row["close"] for row in rows] == [101.0, 102.0]
@@ -149,7 +151,7 @@ def test_alpaca_crypto_source_request_failure_returns_empty(monkeypatch):
     assert source.get_kline("BTC/USD", "1m", 5) == []
 
 
-def test_alpaca_crypto_live_before_time_uses_latest_bars_shape(monkeypatch):
+def test_alpaca_crypto_live_before_time_uses_recent_window(monkeypatch):
     calls = {}
 
     def fake_get(url, params=None, headers=None, timeout=None):
@@ -176,8 +178,8 @@ def test_alpaca_crypto_live_before_time_uses_latest_bars_shape(monkeypatch):
 
     source = AlpacaCryptoDataSource({"api_key": "key", "secret_key": "secret"})
     assert source.get_kline("BTC/USD", "1m", 5, before_time=1)
-    assert calls["params"] == {
-        "symbols": "BTC/USD",
-        "timeframe": "1Min",
-        "limit": 5,
-    }
+    assert calls["params"]["symbols"] == "BTC/USD"
+    assert calls["params"]["timeframe"] == "1Min"
+    assert calls["params"]["limit"] == 20
+    assert calls["params"]["start"].endswith("Z")
+    assert calls["params"]["end"].endswith("Z")

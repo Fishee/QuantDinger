@@ -154,6 +154,9 @@ def create_strategy():
         payload['strategy_type'] = payload.get('strategy_type') or 'IndicatorStrategy'
         new_id = get_strategy_service().create_strategy(payload)
         return jsonify({'code': 1, 'msg': 'success', 'data': {'id': new_id}})
+    except ValueError as e:
+        logger.warning(f"create_strategy validation failed: {str(e)}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 400
     except Exception as e:
         logger.error(f"create_strategy failed: {str(e)}")
         logger.error(traceback.format_exc())
@@ -191,6 +194,9 @@ def batch_create_strategies():
                 'msg': 'Batch creation failed',
                 'data': result
             })
+    except ValueError as e:
+        logger.warning(f"batch_create_strategies validation failed: {str(e)}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 400
     except Exception as e:
         logger.error(f"batch_create_strategies failed: {str(e)}")
         logger.error(traceback.format_exc())
@@ -385,6 +391,9 @@ def update_strategy():
         if not ok:
             return jsonify({'code': 0, 'msg': 'Strategy not found', 'data': None}), 404
         return jsonify({'code': 1, 'msg': 'success', 'data': None})
+    except ValueError as e:
+        logger.warning(f"update_strategy validation failed: {str(e)}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 400
     except Exception as e:
         logger.error(f"update_strategy failed: {str(e)}")
         logger.error(traceback.format_exc())

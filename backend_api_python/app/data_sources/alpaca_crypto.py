@@ -195,17 +195,15 @@ class AlpacaCryptoDataSource(BaseDataSource):
         before_time: Optional[int],
         after_time: Optional[int],
     ) -> None:
-        # Live strategy calls pass before_time=now. For this latest-bars case,
-        # use Alpaca's simple/latest form, matching the verified curl request.
-        if after_time is None and before_time and self._is_near_now(int(before_time)):
-            return
-
         if after_time is not None:
             params["start"] = self._format_rfc3339(int(after_time))
-        elif before_time:
+        else:
+            effective_before = int(before_time) if before_time else int(datetime.now(timezone.utc).timestamp())
             qd_timeframe = self._qd_timeframe(timeframe)
-            span = TIMEFRAME_SECONDS.get(qd_timeframe, 60) * max(limit + 1, 1)
-            params["start"] = self._format_rfc3339(max(0, int(before_time) - int(span)))
+            span = TIMEFRAME_SECONDS.get(qd_timeframe, 60) * max(limit + 2, 3)
+            params["start"] = self._format_rfc3339(max(0, effective_before - int(span)))
+            params["end"] = self._format_rfc3339(effective_before)
+            return
 
         if before_time:
             params["end"] = self._format_rfc3339(int(before_time))
@@ -219,12 +217,16 @@ class AlpacaCryptoDataSource(BaseDataSource):
         before_time: Optional[int],
         after_time: Optional[int],
     ) -> List[Dict[str, Any]]:
+        api_request_limit = request_limit
+        if after_time is None:
+            api_request_limit = min(10000, max(request_limit + 10, request_limit * 2, 20))
+
         params: Dict[str, Any] = {
             "symbols": alpaca_symbol,
             "timeframe": alpaca_timeframe,
-            "limit": request_limit,
+            "limit": api_request_limit,
         }
-        self._apply_time_bounds(params, qd_timeframe, request_limit, before_time, after_time)
+        self._apply_time_bounds(params, qd_timeframe, api_request_limit, before_time, after_time)
 
         try:
             logger.info(

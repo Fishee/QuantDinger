@@ -36,6 +36,61 @@ def get_strategy_service() -> "StrategyService":
 # inline broker checks here.
 
 
+def _market_type_alias(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in ("futures", "future", "perp", "perpetual"):
+        return "swap"
+    return raw
+
+
+def _normalize_alpaca_crypto_strategy_config(
+    *,
+    exchange_id: str,
+    market_category: str,
+    trading_config: Dict[str, Any],
+    exchange_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Make mobile/legacy Alpaca crypto payloads match Alpaca's spot-only desk.
+
+    The broker policy remains strict and still rejects Alpaca crypto swap when
+    called directly. CRUD normalizes only this one unambiguous case so stale
+    clients with a crypto default of ``swap`` can still create an Alpaca spot
+    strategy.
+    """
+    tc = dict(trading_config or {})
+    ex = str(exchange_id or "").strip().lower()
+    mc = str(market_category or "").strip().lower()
+    if ex != "alpaca" or mc != "crypto":
+        return tc
+
+    raw_mt = tc.get("market_type")
+    if raw_mt is None:
+        raw_mt = tc.get("marketType")
+    if raw_mt is None and isinstance(exchange_config, dict):
+        raw_mt = (
+            exchange_config.get("market_type")
+            or exchange_config.get("marketType")
+            or exchange_config.get("defaultType")
+        )
+    mt = _market_type_alias(raw_mt)
+    if mt and mt != "swap":
+        if mt == "spot":
+            tc["market_type"] = "spot"
+            if isinstance(exchange_config, dict):
+                exchange_config["market_type"] = "spot"
+        return tc
+
+    if mt != "spot":
+        logger.info(
+            "Strategy config: normalized Alpaca Crypto market_type from %r to 'spot'",
+            raw_mt,
+        )
+    tc["market_type"] = "spot"
+    if isinstance(exchange_config, dict):
+        exchange_config["market_type"] = "spot"
+    return tc
+
+
 class StrategyService:
     """Strategy service."""
     
@@ -954,6 +1009,12 @@ class StrategyService:
         # tightening a rule should only need a change in one place.
         from app.services.broker_market_policy import validate_strategy_config
         exchange_id = (resolved_ex_cfg.get('exchange_id') or '').strip().lower() if isinstance(resolved_ex_cfg, dict) else ''
+        trading_config = _normalize_alpaca_crypto_strategy_config(
+            exchange_id=exchange_id,
+            market_category=market_category,
+            trading_config=trading_config,
+            exchange_config=exchange_config if isinstance(exchange_config, dict) else None,
+        )
         marketplace_delivery = bool(payload.get('marketplace_delivery'))
         validate_strategy_config(
             exchange_id=exchange_id,
@@ -1102,6 +1163,13 @@ class StrategyService:
         uid_bc = int(payload.get('user_id') or 1)
         _resolved_bc = _resolve_ex(exchange_config if isinstance(exchange_config, dict) else {}, user_id=uid_bc)
         exchange_id = (_resolved_bc.get('exchange_id') or '').strip().lower() if isinstance(_resolved_bc, dict) else ''
+        batch_trading_config = _normalize_alpaca_crypto_strategy_config(
+            exchange_id=exchange_id,
+            market_category=market_category,
+            trading_config=batch_trading_config,
+            exchange_config=exchange_config if isinstance(exchange_config, dict) else None,
+        )
+        payload['trading_config'] = batch_trading_config
         _validate_policy(
             exchange_id=exchange_id,
             market_category=market_category,
@@ -1331,6 +1399,26 @@ class StrategyService:
 
         trading_config = self._sanitize_grid_trading_config(trading_config)
 
+        from app.services.exchange_execution import coalesce_exchange_config_from_payload, resolve_exchange_config as _resolve_ex_upd
+
+        exchange_config = coalesce_exchange_config_from_payload({
+            **payload,
+            'exchange_config': exchange_config,
+            'trading_config': trading_config,
+        })
+
+        _merged_ex = _resolve_ex_upd(
+            exchange_config if isinstance(exchange_config, dict) else {},
+            user_id=int(user_id or 1),
+        )
+        ex_id = (_merged_ex.get('exchange_id') or '').strip().lower() if isinstance(_merged_ex, dict) else ''
+        trading_config = _normalize_alpaca_crypto_strategy_config(
+            exchange_id=ex_id,
+            market_category=market_category,
+            trading_config=trading_config,
+            exchange_config=exchange_config if isinstance(exchange_config, dict) else None,
+        )
+
         # When credential_id is present, strip raw API keys to avoid
         # storing secrets in the strategy record. They live in qd_exchange_credentials.
         if isinstance(exchange_config, dict) and exchange_config.get('credential_id'):
@@ -1371,19 +1459,6 @@ class StrategyService:
             )
             symbol = trading_config.get('symbol') or symbol
 
-        from app.services.exchange_execution import coalesce_exchange_config_from_payload, resolve_exchange_config as _resolve_ex_upd
-
-        exchange_config = coalesce_exchange_config_from_payload({
-            **payload,
-            'exchange_config': exchange_config,
-            'trading_config': trading_config,
-        })
-
-        _merged_ex = _resolve_ex_upd(
-            exchange_config if isinstance(exchange_config, dict) else {},
-            user_id=int(user_id or 1),
-        )
-        ex_id = (_merged_ex.get('exchange_id') or '').strip().lower() if isinstance(_merged_ex, dict) else ''
         # Resolve effective execution_mode (payload may override existing).
         _upd_exec_mode = ((payload.get('execution_mode') if payload.get('execution_mode') is not None
                            else existing.get('execution_mode')) or 'signal').strip().lower()
