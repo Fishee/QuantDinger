@@ -106,6 +106,7 @@ class TestValidateLegalCombos:
         ("bybit", "Crypto", "spot", "long"),
         ("bitget", "Crypto", "swap", "both"),
         ("alpaca", "USStock", "spot", "long"),
+        ("alpaca", "USStock", "USStock", "long"),
         ("gate", "Crypto", "swap", "short"),
         ("htx", "Crypto", "spot", "long"),
         # IBKR US stocks

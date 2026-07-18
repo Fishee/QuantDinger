@@ -4,37 +4,46 @@ from app.utils.auth import generate_token
 class _FakeStrategyService:
     def __init__(self):
         self.rows = {}
-        self.next_id = 1000
-
-    def create_strategy(self, payload):
-        strategy_id = self.next_id
-        self.next_id += 1
-        row = dict(payload)
-        row["id"] = strategy_id
-        row["status"] = row.get("status") or "stopped"
-        self.rows[strategy_id] = row
-        return strategy_id
 
     def get_strategy(self, strategy_id, user_id=None):
         row = self.rows.get(int(strategy_id))
-        if not row:
-            return None
-        if user_id is not None and int(row.get("user_id") or 0) != int(user_id):
+        if not row or (user_id is not None and int(row["user_id"]) != int(user_id)):
             return None
         return dict(row)
 
-    def get_strategy_type(self, strategy_id):
-        row = self.rows.get(int(strategy_id)) or {}
-        return row.get("strategy_type")
-
     def update_strategy_status(self, strategy_id, status, user_id=None):
         row = self.rows.get(int(strategy_id))
-        if not row:
-            return False
-        if user_id is not None and int(row.get("user_id") or 0) != int(user_id):
+        if not row or (user_id is not None and int(row["user_id"]) != int(user_id)):
             return False
         row["status"] = status
         return True
+
+
+class _FakeSourceService:
+    def __init__(self):
+        self.sources = []
+
+    def create_source(self, payload):
+        self.sources.append(dict(payload))
+        return 500 + len(self.sources)
+
+
+class _FakeDeploymentService:
+    def __init__(self, strategies):
+        self.strategies = strategies
+        self.payloads = []
+
+    def save(self, *, user_id, payload, strategy_id=None):
+        self.payloads.append(dict(payload))
+        new_id = int(strategy_id or 1000 + len(self.payloads))
+        self.strategies.rows[new_id] = {
+            "id": new_id,
+            "user_id": user_id,
+            "strategy_name": payload["name"],
+            "strategy_type": "StrategyV2",
+            "status": "stopped",
+        }
+        return new_id
 
 
 class _FakeTradingExecutor:
@@ -45,8 +54,11 @@ class _FakeTradingExecutor:
         self.started.append(int(strategy_id))
         return True
 
-    def wait_strategy_running(self, strategy_id, timeout=3.0):
-        return True, ""
+    def wait_strategy_running(self, strategy_id, timeout=0):
+        return int(strategy_id) in self.started, ""
+
+    def is_running(self, strategy_id):
+        return int(strategy_id) in self.started
 
 
 def _auth_headers(monkeypatch):
@@ -61,13 +73,15 @@ def test_executor_strategy_create_and_start_routes(client, monkeypatch):
     from app.routes import strategy as strategy_routes
     from app.routes import strategy_executor_routes
 
-    service = _FakeStrategyService()
+    strategies = _FakeStrategyService()
+    sources = _FakeSourceService()
+    deployments = _FakeDeploymentService(strategies)
     executor = _FakeTradingExecutor()
-
-    monkeypatch.setattr(strategy_executor_routes, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(strategy_routes, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(strategy_executor_routes, "get_strategy_service", lambda: strategies)
+    monkeypatch.setattr(strategy_executor_routes, "get_script_source_service", lambda: sources)
+    monkeypatch.setattr(strategy_executor_routes, "get_strategy_v2_deployment_service", lambda: deployments)
+    monkeypatch.setattr(strategy_routes, "get_strategy_service", lambda: strategies)
     monkeypatch.setattr(strategy_routes, "get_trading_executor", lambda: executor)
-    monkeypatch.setattr(strategy_routes, "_find_live_strategy_conflict", lambda strategy, user_id: None)
 
     headers = _auth_headers(monkeypatch)
     created_ids = []
@@ -92,36 +106,19 @@ def test_executor_strategy_create_and_start_routes(client, monkeypatch):
                 "max_layers": 4,
                 "layer_count": 5,
                 "orders_per_layer": 3,
-                "intra_spacing_1_pct": 0.005,
-                "intra_spacing_2_pct": 0.008,
-                "inter_spacing_1_pct": 0.012,
-                "inter_spacing_2_pct": 0.015,
-                "inter_spacing_3_pct": 0.018,
-                "inter_spacing_4_pct": 0.022,
             },
         )
-
-        assert response.status_code == 200
         body = response.get_json()
+        assert response.status_code == 200
         assert body["code"] == 1
-        strategy_id = int(body["data"]["id"])
-        created_ids.append(strategy_id)
-        row = service.rows[strategy_id]
-        trading_config = row["trading_config"]
-        assert row["strategy_type"] == "ScriptStrategy"
-        assert row["strategy_mode"] == "bot"
-        assert trading_config["strategy_family"] == "executor"
-        assert trading_config["executor_type"] == executor_type
-        assert trading_config["bot_type"] == executor_type
-        assert row["strategy_code"]
+        created_ids.append(int(body["data"]["id"]))
+        assert sources.sources[-1]["code"]
+        assert deployments.payloads[-1]["sourceId"] == body["data"]["source_id"]
 
     for strategy_id in created_ids:
-        response = client.post(
-            f"/api/strategies/start?id={strategy_id}",
-            headers=headers,
-        )
+        response = client.post(f"/api/strategies/{strategy_id}/start", headers=headers)
         assert response.status_code == 200
         assert response.get_json()["code"] == 1
-        assert service.rows[strategy_id]["status"] == "running"
 
     assert executor.started == created_ids
+    assert all(strategies.rows[strategy_id]["status"] == "running" for strategy_id in created_ids)

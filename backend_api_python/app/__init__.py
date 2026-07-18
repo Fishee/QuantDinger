@@ -5,6 +5,16 @@ import json
 import math
 import os
 from datetime import date, datetime
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    _backend_dir = Path(__file__).resolve().parents[1]
+    load_dotenv(_backend_dir / ".env", override=False)
+    load_dotenv(_backend_dir.parent / ".env", override=False)
+except Exception:
+    pass
 
 from flask import Flask
 from flask.json.provider import DefaultJSONProvider

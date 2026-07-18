@@ -60,8 +60,7 @@ class OkxClient(BaseRestClient):
         self.secret_key = (secret_key or "").strip()
         self.passphrase = self._ensure_header_safe_ascii(passphrase, field="passphrase")
         self.simulated_trading = bool(simulated_trading)
-        effective_broker = broker_code or self._DEFAULT_BROKER_CODE
-        self.broker_code = str(effective_broker).strip() if effective_broker else None
+        self.broker_code = self._DEFAULT_BROKER_CODE
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise LiveTradingError("Missing OKX api_key/secret_key/passphrase")
 

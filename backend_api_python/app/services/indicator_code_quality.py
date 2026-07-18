@@ -438,7 +438,7 @@ def _has_strategy_annotations(code: str) -> bool:
         return True
     if re.search(r"^\s*#?\s*(signal_form|exit_owner|flip_mode|timeframe|kline_timeframe)\s*:", c, re.MULTILINE | re.IGNORECASE):
         return True
-    return bool(re.search(r"\bfour_way\b|\bScriptStrategy\b", c, re.IGNORECASE))
+    return bool(re.search(r"\bfour_way\b", c, re.IGNORECASE))
 
 
 def analyze_indicator_code_quality(code: str) -> List[Dict[str, Any]]:

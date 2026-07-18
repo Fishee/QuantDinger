@@ -49,10 +49,6 @@ class OrderIntentBuilder:
         signal: StrategySignal,
         leverage: float = 1.0,
         idempotency_key: str = "",
-        basket_id: str = "",
-        basket_order_id: int = 0,
-        layer_index: int = 0,
-        order_index: int = 0,
         existing_order_intent_id: int = 0,
         extra_payload: Optional[Dict[str, Any]] = None,
     ) -> IntentBuildResult:
@@ -65,19 +61,11 @@ class OrderIntentBuilder:
                 symbol=str(signal.symbol or ""),
                 signal_type=str(signal.action or ""),
                 signal_ts=_signal_ts(signal.timestamp),
-                basket_id=str(basket_id or ""),
-                layer_index=int(layer_index or 0),
-                order_index=int(order_index or 0),
-                action=str(signal.action or ""),
             )
         runtime_payload = {
             "strategy_run_id": int(signal.strategy_run_id or 0),
             "order_intent_id": int(existing_order_intent_id or 0),
             "idempotency_key": key,
-            "basket_id": str(basket_id or ""),
-            "basket_order_db_id": int(basket_order_id or 0),
-            "layer_index": int(layer_index or 0),
-            "order_index": int(order_index or 0),
         }
         if int(existing_order_intent_id or 0) > 0:
             return IntentBuildResult(intent=None, idempotency_key=key, runtime_payload=runtime_payload)
@@ -100,8 +88,6 @@ class OrderIntentBuilder:
             notional=self.sizer.notional(signal, leverage=leverage),
             limit_price=float(signal.price_hint or 0.0) if signal.order_type == "limit" else 0.0,
             execution_algo=signal.execution_algo,
-            basket_id=str(basket_id or ""),
-            basket_order_id=int(basket_order_id or 0),
             payload=payload,
             portfolio_id=signal.portfolio_id,
             universe_id=signal.universe_id,

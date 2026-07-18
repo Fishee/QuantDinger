@@ -126,14 +126,43 @@ def run_market_catalog_sync_inline(trigger: str = "scheduled") -> dict:
     return {"started": True, "run_id": run_id}
 
 
-def start_market_catalog_sync_on_boot() -> None:
+def _market_catalog_is_initialized() -> bool:
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                           SELECT 1
+                             FROM qd_market_sync_runs
+                            WHERE status = 'success'
+                       ) AS has_success,
+                       COUNT(*) FILTER (
+                           WHERE market = 'Crypto' AND is_active = 1
+                       ) AS active_crypto
+                  FROM qd_market_symbols
+                """
+            )
+            row = dict(cur.fetchone() or {})
+            return bool(row.get("has_success")) and int(row.get("active_crypto") or 0) > 0
+        finally:
+            cur.close()
+
+
+def start_market_catalog_sync_on_boot() -> dict:
+    """Start one initial sync only when the shared catalog is not initialized."""
     if os.getenv("MARKET_CATALOG_AUTO_SYNC", "true").strip().lower() not in ("1", "true", "yes", "on"):
         logger.info("Automatic market catalog sync is disabled")
-        return
+        return {"started": False, "reason": "disabled"}
     if os.getenv("PYTHON_API_DEBUG", "false").lower() == "true" and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
-        return
+        return {"started": False, "reason": "debug_parent"}
+    if _market_catalog_is_initialized():
+        result = {"started": False, "reason": "already_initialized"}
+        logger.info("Initial market catalog sync skipped: %s", result)
+        return result
     result = start_market_catalog_sync("startup")
-    logger.info("Automatic market catalog sync: %s", result)
+    logger.info("Initial market catalog sync: %s", result)
+    return result
 
 
 def get_market_catalog_overview() -> dict:

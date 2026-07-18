@@ -88,6 +88,8 @@ def _norm_market_type(value: Optional[str]) -> str:
     raw = (value or "").strip().lower()
     if raw in ("futures", "future", "perp", "perpetual"):
         return "swap"
+    if raw in ("usstock", "us_stock", "stock", "stocks", "equity", "cash"):
+        return "spot"
     return raw
 
 

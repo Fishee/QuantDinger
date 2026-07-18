@@ -21,6 +21,8 @@ from app.services.live_trading.execution import place_order_from_signal
 from app.services.live_trading.factory import create_client
 from app.services.live_trading.records import (
     ensure_position_ledger_schema,
+    fetch_allocated_position_size,
+    fetch_position_size_for_side,
     normalize_strategy_symbol,
     strategy_allowed_symbols,
 )
@@ -106,6 +108,74 @@ AlpacaClient = None
 logger = get_logger(__name__)
 
 ALPACA_FILL_DELTA_EPSILON = 1e-8
+
+
+def _broker_order_type(payload: Dict[str, Any], ref_price: float) -> Tuple[str, float]:
+    order_type = str(payload.get("order_type") or "market").strip().lower()
+    if order_type == "maker_then_market":
+        raise LiveTradingError("maker_then_market is not supported by broker execution")
+    if order_type not in ("market", "limit"):
+        raise LiveTradingError(f"unsupported_broker_order_type:{order_type}")
+    limit_price = float(payload.get("limit_price") or 0.0)
+    if order_type == "limit" and limit_price <= 0:
+        limit_price = float(ref_price or 0.0)
+    if order_type == "limit" and limit_price <= 0:
+        raise LiveTradingError("broker_limit_price_required")
+    return order_type, limit_price
+
+
+def _broker_protection_prices(
+    payload: Dict[str, Any],
+    *,
+    signal_type: str,
+    entry_price: float,
+) -> Tuple[float, float]:
+    sig = str(signal_type or "").strip().lower()
+    if sig not in ("open_long", "add_long", "open_short", "add_short") or entry_price <= 0:
+        return 0.0, 0.0
+    from app.services.live_trading.native_protection import protection_prices_from_payload
+
+    stop, take, _trailing, _activation = protection_prices_from_payload(
+        payload,
+        entry_price=float(entry_price),
+        pos_side="short" if "short" in sig else "long",
+    )
+    return float(stop or 0.0), float(take or 0.0)
+
+
+def _commission_snapshot(raw: Any) -> Tuple[float, str]:
+    data = raw if isinstance(raw, dict) else {}
+    try:
+        commission = abs(float(data.get("commission") or 0.0))
+    except Exception:
+        commission = 0.0
+    return commission, str(data.get("commission_ccy") or "").strip().upper()
+
+
+def _previous_commission(row: Dict[str, Any]) -> float:
+    raw = row.get("exchange_response_json") or ""
+    if not isinstance(raw, str) or not raw.strip():
+        return 0.0
+    try:
+        data = json.loads(raw) or {}
+    except Exception:
+        return 0.0
+    if isinstance(data.get("live_fill_sync"), dict):
+        data = data["live_fill_sync"]
+    return _commission_snapshot(data)[0]
+
+
+def _redact_exchange_json(value: str) -> str:
+    from app.services.live_trading.partner_attribution import redact_partner_attribution
+
+    text_value = str(value or "")
+    try:
+        parsed = json.loads(text_value or "{}")
+    except Exception:
+        return str(redact_partner_attribution(text_value))
+    return json.dumps(redact_partner_attribution(parsed), ensure_ascii=False)
+
+
 class PendingOrderWorker(PendingOrderPositionSyncMixin):
     def __init__(self, poll_interval_sec: float = 1.0, batch_size: int = 50):
         self.poll_interval_sec = float(poll_interval_sec)
@@ -133,12 +203,6 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 ensure_position_ledger_schema()
             except Exception as e:
                 logger.warning("ensure_position_ledger_schema failed: %s", e)
-            try:
-                from app.services.strategy_runtime.schema import ensure_strategy_runtime_schema
-
-                ensure_strategy_runtime_schema()
-            except Exception as e:
-                logger.warning("ensure_strategy_runtime_schema failed: %s", e)
             if self._thread and self._thread.is_alive():
                 return True
             self._stop_event.clear()
@@ -165,6 +229,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
 
     def _tick(self) -> None:
         # logger.info(f"[PendingOrderWorker] _tick start. last_sync={self._last_position_sync_ts}")
+        self._sync_quick_trade_orders()
         self._sync_alpaca_sent_orders()
         self._sync_live_sent_orders()
         orders = self._fetch_pending_orders(limit=self.batch_size)
@@ -188,6 +253,179 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 self._mark_failed(order_id=int(oid), error=str(e))
 
         self._maybe_sync_positions()
+
+    def _sync_quick_trade_orders(self, limit: int = 50) -> None:
+        """Reconcile non-terminal Quick Trade orders and protect new fills."""
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM qd_quick_trades
+                    WHERE status IN ('submitted', 'partially_filled')
+                      AND COALESCE(exchange_order_id, '') <> ''
+                      AND created_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+        except Exception as exc:
+            logger.debug("Quick Trade reconciliation query failed: %s", exc)
+            return
+
+        for raw_row in rows:
+            row = dict(raw_row)
+            try:
+                self._sync_one_quick_trade_order(row)
+            except Exception as exc:
+                logger.warning(
+                    "Quick Trade reconciliation failed trade_id=%s: %s",
+                    row.get("id"),
+                    exc,
+                )
+
+    def _sync_one_quick_trade_order(self, row: Dict[str, Any]) -> None:
+        from app.services.quick_trade.credentials import build_exchange_config, create_exchange_client
+        from app.services.quick_trade.orders import (
+            attach_quick_trade_protection,
+            enrich_fill,
+            quick_order_status,
+        )
+
+        trade_id = int(row.get("id") or 0)
+        user_id = int(row.get("user_id") or 0)
+        credential_id = int(row.get("credential_id") or 0)
+        if trade_id <= 0 or user_id <= 0 or credential_id <= 0:
+            return
+        market_type = str(row.get("market_type") or "swap").strip().lower()
+        stored_raw = row.get("raw_result") or {}
+        if isinstance(stored_raw, str):
+            try:
+                stored_raw = json.loads(stored_raw) or {}
+            except Exception:
+                stored_raw = {}
+        if not isinstance(stored_raw, dict):
+            stored_raw = {"raw": stored_raw}
+        metadata = stored_raw.get("_quick_trade")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        margin_mode = str(metadata.get("margin_mode") or "cross").strip().lower()
+        exchange_config = build_exchange_config(
+            credential_id,
+            user_id,
+            {"market_type": market_type, "margin_mode": margin_mode, "td_mode": margin_mode},
+        )
+        client = create_exchange_client(exchange_config, market_type=market_type)
+        enrich = enrich_fill(
+            client,
+            order_id=str(row.get("exchange_order_id") or ""),
+            symbol=str(row.get("symbol") or ""),
+            market_type=market_type,
+            max_wait_sec=0.25,
+        )
+        observed_filled = max(0.0, float(enrich.get("filled") or 0.0))
+        cumulative_avg = max(0.0, float(enrich.get("avg_price") or 0.0))
+        previous_filled = max(0.0, float(row.get("filled_amount") or 0.0))
+        cumulative_filled = max(previous_filled, observed_filled)
+        if observed_filled + ALPACA_FILL_DELTA_EPSILON < previous_filled:
+            cumulative_avg = float(row.get("avg_fill_price") or 0.0)
+        protected_filled = max(0.0, float(metadata.get("protected_filled_qty") or 0.0))
+        delta_to_protect = cumulative_filled - protected_filled
+        protection_error = ""
+        metadata_changed = False
+        if delta_to_protect > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
+            try:
+                protection_result = attach_quick_trade_protection(
+                    client,
+                    symbol=str(row.get("symbol") or ""),
+                    side=str(row.get("side") or ""),
+                    filled_qty=delta_to_protect,
+                    avg_price=cumulative_avg,
+                    tp_price=float(row.get("tp_price") or 0.0),
+                    sl_price=float(row.get("sl_price") or 0.0),
+                    market_type=market_type,
+                    exchange_config=exchange_config,
+                    leverage=float(row.get("leverage") or 1.0),
+                    margin_mode=margin_mode,
+                    client_order_id=f"qdsync{trade_id}",
+                )
+                if protection_result:
+                    prior = metadata.get("native_protection")
+                    metadata["native_protection"] = (
+                        list(prior) if isinstance(prior, list) else []
+                    ) + protection_result
+                    metadata["protected_filled_qty"] = cumulative_filled
+                    metadata["native_protection_error"] = ""
+                    metadata_changed = True
+            except Exception as exc:
+                protection_error = str(exc)
+                metadata["native_protection_error"] = protection_error
+
+        requested_qty = max(0.0, float(metadata.get("requested_base_qty") or 0.0))
+        status = quick_order_status(
+            requested_qty=requested_qty,
+            filled_qty=cumulative_filled,
+            exchange_status=str(enrich.get("status") or ""),
+        )
+        metadata["exchange_status"] = str(enrich.get("status") or "")
+        metadata["last_reconciled_at"] = int(time.time())
+        stored_raw["_quick_trade"] = metadata
+        avg_to_store = cumulative_avg or float(row.get("avg_fill_price") or 0.0)
+        fee_to_store = max(float(row.get("commission") or 0.0), float(enrich.get("fee") or 0.0))
+        fee_ccy = str(enrich.get("fee_ccy") or row.get("commission_ccy") or "").strip().upper()
+        from app.services.live_trading.fee_quote import fee_to_quote
+        fee_quote = fee_to_quote(
+            client,
+            symbol=str(row.get("symbol") or ""),
+            fee=fee_to_store,
+            fee_ccy=fee_ccy,
+            fill_price=avg_to_store,
+        )
+        if fee_quote is None and row.get("commission_quote") is not None:
+            fee_quote = float(row.get("commission_quote") or 0.0)
+        error_msg = protection_error or str(row.get("error_msg") or "")
+
+        if (
+            cumulative_filled <= previous_filled + ALPACA_FILL_DELTA_EPSILON
+            and status == str(row.get("status") or "")
+            and not protection_error
+            and not metadata_changed
+        ):
+            return
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE qd_quick_trades
+                SET status = %s,
+                    filled_amount = %s,
+                    avg_fill_price = %s,
+                    commission = %s,
+                    commission_ccy = %s,
+                    commission_quote = %s,
+                    error_msg = %s,
+                    raw_result = %s
+                WHERE id = %s
+                  AND status IN ('submitted', 'partially_filled')
+                """,
+                (
+                    status,
+                    cumulative_filled,
+                    avg_to_store,
+                    fee_to_store,
+                    fee_ccy,
+                    fee_quote,
+                    error_msg,
+                    json.dumps(stored_raw, ensure_ascii=False),
+                    trade_id,
+                ),
+            )
+            db.commit()
+            cur.close()
 
     def _maybe_sync_positions(self) -> None:
         if not self._position_sync_enabled:
@@ -341,6 +579,8 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         previous_filled = float(row.get("filled") or 0.0)
         previous_avg = float(row.get("avg_price") or 0.0)
         raw_json = json.dumps(result.raw or {}, ensure_ascii=False)
+        cumulative_commission, commission_ccy = _commission_snapshot(result.raw)
+        commission_delta = max(0.0, cumulative_commission - _previous_commission(row))
 
         delta = cumulative_filled - previous_filled
         if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
@@ -358,6 +598,14 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 or "USStock"
             )
             market_type_for_client = "crypto" if market_category.lower() in ("crypto", "cryptocurrency") else "USStock"
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=str(symbol or ""),
+                fee=commission_delta,
+                fee_ccy=commission_ccy,
+                fill_price=delta_avg,
+            )
             profit, _matched_entry = persist_strategy_fill(
                 strategy_id=strategy_id,
                 symbol=str(symbol or ""),
@@ -368,10 +616,12 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 market_type=market_type_for_client,
                 order_id=order_id,
                 fill_source="worker_alpaca_fill_sync",
+                commission=commission_delta,
+                commission_ccy=commission_ccy,
+                commission_quote=commission_quote,
                 close_reason=trade_close_reason_from_payload(payload, str(signal_type or "")),
                 strategy_run_id=int(payload.get("strategy_run_id") or row.get("strategy_run_id") or 0),
                 order_intent_id=int(payload.get("order_intent_id") or row.get("order_intent_id") or 0),
-                basket_id=str(payload.get("basket_id") or ""),
                 exchange_id="alpaca",
                 exchange_order_id=str(exchange_order_id or ""),
                 raw_fill=result.raw or {},
@@ -504,7 +754,14 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     """
                     SELECT *
                     FROM pending_orders
-                    WHERE status = 'sent'
+                    WHERE (
+                            status = 'sent'
+                            OR (
+                                status = 'filled'
+                                AND COALESCE(filled, 0) <= 0
+                                AND COALESCE(avg_price, 0) <= 0
+                            )
+                          )
                       AND LOWER(COALESCE(exchange_id, '')) <> 'alpaca'
                       AND COALESCE(exchange_id, '') <> ''
                       AND COALESCE(exchange_order_id, '') <> ''
@@ -532,7 +789,14 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     dispatch_note = 'live_fill_sync:syncing',
                     updated_at = NOW()
                 WHERE id = %s
-                  AND status = 'sent'
+                  AND (
+                        status = 'sent'
+                        OR (
+                            status = 'filled'
+                            AND COALESCE(filled, 0) <= 0
+                            AND COALESCE(avg_price, 0) <= 0
+                        )
+                      )
                   AND LOWER(COALESCE(exchange_id, '')) <> 'alpaca'
                   AND COALESCE(exchange_order_id, '') <> ''
                 RETURNING *
@@ -572,11 +836,14 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         )
         try:
             client = create_client(exchange_config, market_type=market_type)
+            sync_raw: Dict[str, Any] = {}
             if exchange_id == "ibkr" and hasattr(client, "get_order_status"):
                 broker_result = client.get_order_status(exchange_order_id)
                 cumulative_filled = float(broker_result.filled or 0.0)
                 cumulative_avg = float(broker_result.avg_price or 0.0)
                 exchange_status = normalize_live_order_status(broker_result.status)
+                broker_raw = getattr(broker_result, "raw", {})
+                sync_raw = broker_raw if isinstance(broker_raw, dict) else {}
             else:
                 cumulative_filled, cumulative_avg, exchange_status = query_grid_order_fill(
                     client,
@@ -611,6 +878,8 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         delta = cumulative_filled - tracked_previous_filled
         aggregate_filled = previous_filled
         aggregate_avg = previous_avg
+        cumulative_commission, commission_ccy = _commission_snapshot(sync_raw)
+        commission_delta = max(0.0, cumulative_commission - _previous_commission(row))
 
         if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
             delta_avg = cumulative_avg
@@ -629,6 +898,33 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 aggregate_filled = previous_filled + delta
                 aggregate_avg = delta_avg
             signal_type = str(payload.get("signal_type") or row.get("signal_type") or "")
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=symbol,
+                fee=commission_delta,
+                fee_ccy=commission_ccy,
+                fill_price=delta_avg,
+            )
+            protection_result: List[Dict[str, Any]] = []
+            try:
+                protection_result = self._attach_native_protection(
+                    client=client,
+                    payload=payload,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    quantity=delta,
+                    entry_price=delta_avg,
+                    exchange_config=exchange_config,
+                    market_type=market_type,
+                    client_order_id=f"qdprot{order_id}",
+                )
+            except Exception as exc:
+                append_strategy_log(
+                    strategy_id,
+                    "error",
+                    f"Native protection placement failed; runtime protection remains active: {symbol}: {exc}",
+                )
             persist_strategy_fill(
                 strategy_id=strategy_id,
                 symbol=symbol,
@@ -639,13 +935,19 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 market_type=market_type,
                 order_id=order_id,
                 fill_source="worker_live_fill_sync",
+                commission=commission_delta,
+                commission_ccy=commission_ccy,
+                commission_quote=commission_quote,
                 close_reason=trade_close_reason_from_payload(payload, signal_type),
                 strategy_run_id=int(payload.get("strategy_run_id") or row.get("strategy_run_id") or 0),
                 order_intent_id=int(payload.get("order_intent_id") or row.get("order_intent_id") or 0),
-                basket_id=str(payload.get("basket_id") or ""),
                 exchange_id=exchange_id,
                 exchange_order_id=exchange_order_id,
-                raw_fill={"status": exchange_status, "cumulative_filled": cumulative_filled},
+                raw_fill={
+                    "status": exchange_status,
+                    "cumulative_filled": cumulative_filled,
+                    "native_protection": protection_result,
+                },
             )
             append_strategy_log(
                 strategy_id,
@@ -680,11 +982,82 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     "live_fill_sync": {
                         "tracked_filled": cumulative_filled,
                         "tracked_avg_price": cumulative_avg,
+                        "commission": cumulative_commission,
+                        "commission_ccy": commission_ccy,
                     },
                 },
                 ensure_ascii=False,
             ),
         )
+
+    @staticmethod
+    def _attach_native_protection(
+        *,
+        client: Any,
+        payload: Dict[str, Any],
+        symbol: str,
+        signal_type: str,
+        quantity: float,
+        entry_price: float,
+        exchange_config: Dict[str, Any],
+        market_type: str,
+        client_order_id: str,
+    ) -> List[Dict[str, Any]]:
+        sig = str(signal_type or "").strip().lower()
+        if sig not in {"open_long", "add_long", "open_short", "add_short"}:
+            return []
+        if str(market_type or "").strip().lower() != "swap":
+            return []
+
+        from app.services.live_trading.native_protection import (
+            NativeProtectionRequest,
+            place_native_protection_orders,
+            protection_prices_from_payload,
+        )
+
+        pos_side = "short" if "short" in sig else "long"
+        stop, take, trailing, activation = protection_prices_from_payload(
+            payload,
+            entry_price=float(entry_price or 0.0),
+            pos_side=pos_side,
+        )
+        if stop <= 0 and take <= 0 and trailing <= 0:
+            return []
+        margin_mode = str(
+            payload.get("margin_mode")
+            or payload.get("marginMode")
+            or exchange_config.get("margin_mode")
+            or exchange_config.get("marginMode")
+            or "cross"
+        ).strip().lower()
+        request = NativeProtectionRequest(
+            symbol=str(symbol),
+            pos_side=pos_side,
+            quantity=float(quantity or 0.0),
+            entry_price=float(entry_price or 0.0),
+            stop_loss_price=stop,
+            take_profit_price=take,
+            trailing_stop_pct=trailing,
+            trailing_activation_pct=activation,
+            margin_mode="isolated" if margin_mode in ("isolated", "iso") else "cross",
+            leverage=float(payload.get("leverage") or exchange_config.get("leverage") or 1.0),
+            product_type=str(
+                payload.get("product_type")
+                or payload.get("productType")
+                or exchange_config.get("product_type")
+                or exchange_config.get("productType")
+                or "USDT-FUTURES"
+            ),
+            margin_coin=str(
+                payload.get("margin_coin")
+                or payload.get("marginCoin")
+                or exchange_config.get("margin_coin")
+                or exchange_config.get("marginCoin")
+                or "USDT"
+            ),
+            client_order_id=str(client_order_id or ""),
+        )
+        return place_native_protection_orders(client, request)
 
     def _update_live_sent_order_snapshot(
         self,
@@ -696,6 +1069,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         avg_price: float,
         exchange_response_json: str,
     ) -> None:
+        exchange_response_json = _redact_exchange_json(exchange_response_json)
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -1253,21 +1627,6 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
 
         from app.services.live_trading.position_query import query_exchange_position_size
 
-        pre_position_qty = 0.0
-        try:
-            pre_position_qty = float(
-                query_exchange_position_size(
-                    client=client,
-                    symbol=str(symbol),
-                    pos_side=str(pos_side or ""),
-                    market_type=str(market_type or "swap"),
-                    exchange_config=exchange_config if isinstance(exchange_config, dict) else {},
-                )
-                or 0.0
-            )
-        except Exception as e:
-            logger.debug("pre_position_qty snapshot failed pending_id=%s: %s", order_id, e)
-
         # Leverage handling (best-effort):
         # - For OKX swap, leverage must be set via private endpoint; otherwise exchange defaults apply.
         # - For other exchanges, leverage setting is not implemented yet in this local client.
@@ -1281,16 +1640,124 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         if leverage <= 0:
             leverage = 1.0
 
-        # [FEATURE] Sync positions before execution to ensure size is checking against reality
-        # The user requested to sync before EVERY live order to prevent mismatch.
+        # Refresh the account mirror before validating an opening order.
         try:
             logger.info(f"[Sync] Triggering pre-execution sync for strategy {strategy_id} before order {order_id}")
             self._sync_positions_best_effort(target_strategy_id=strategy_id)
         except Exception as e:
             logger.warning(f"Pre-execution sync failed: {e}")
 
+        pre_position_qty = 0.0
+        try:
+            pre_position_qty = float(
+                query_exchange_position_size(
+                    client=client,
+                    symbol=str(symbol),
+                    pos_side=str(pos_side or ""),
+                    market_type=str(market_type or "swap"),
+                    exchange_config=exchange_config if isinstance(exchange_config, dict) else {},
+                    strict=not reduce_only,
+                )
+                or 0.0
+            )
+        except Exception as e:
+            error = f"position_snapshot_failed:{e}"
+            self._mark_failed(order_id=order_id, error=error)
+            _notify_live_best_effort(status="failed", error=error)
+            append_strategy_log(strategy_id, "error", f"Order rejected because the exchange position snapshot failed: {symbol}")
+            return
+
+        if not reduce_only and market_type == "swap":
+            credential_id = credential_id_from_exchange_config(exchange_config)
+            expected_qty = fetch_allocated_position_size(
+                strategy_id=int(strategy_id),
+                credential_id=int(credential_id or 0),
+                market_type=str(market_type),
+                symbol=str(symbol),
+                side=str(pos_side),
+            )
+            tolerance = max(1e-8, expected_qty * 0.001)
+            if abs(pre_position_qty - expected_qty) > tolerance:
+                error = (
+                    "position_drift_detected:"
+                    f"side={pos_side},exchange={pre_position_qty},allocated={expected_qty}"
+                )
+                self._mark_failed(order_id=order_id, error=error)
+                _notify_live_best_effort(status="failed", error=error)
+                append_strategy_log(strategy_id, "error", f"Order rejected because account and strategy positions differ: {symbol} {pos_side}")
+                return
+
+            opposite_side = "short" if str(pos_side) == "long" else "long"
+            local_opposite = fetch_position_size_for_side(int(strategy_id), str(symbol), opposite_side)
+            if local_opposite > 1e-8:
+                try:
+                    live_opposite = float(
+                        query_exchange_position_size(
+                            client=client,
+                            symbol=str(symbol),
+                            pos_side=opposite_side,
+                            market_type=str(market_type),
+                            exchange_config=exchange_config if isinstance(exchange_config, dict) else {},
+                            strict=True,
+                        )
+                        or 0.0
+                    )
+                except Exception as e:
+                    error = f"opposite_position_snapshot_failed:{e}"
+                    self._mark_failed(order_id=order_id, error=error)
+                    _notify_live_best_effort(status="failed", error=error)
+                    return
+                if live_opposite > 1e-8:
+                    error = (
+                        "opposite_position_still_open:"
+                        f"side={opposite_side},exchange={live_opposite},local={local_opposite}"
+                    )
+                    self._mark_failed(order_id=order_id, error=error)
+                    _notify_live_best_effort(status="failed", error=error)
+                    append_strategy_log(strategy_id, "error", f"Reverse entry rejected until the opposite position is fully closed: {symbol}")
+                    return
+
         # Collect raw exchange interactions / intermediate states for debugging & persistence.
         phases: Dict[str, Any] = {"pre_position_qty": pre_position_qty}
+
+        if not reduce_only and market_type == "swap":
+            try:
+                from app.services.live_trading.account_risk import (
+                    account_risk_limits,
+                    account_risk_snapshot,
+                )
+
+                credential_id = credential_id_from_exchange_config(exchange_config)
+                risk_snapshot = account_risk_snapshot(
+                    user_id=int(cfg.get("user_id") or 1),
+                    credential_id=int(credential_id or 0),
+                    market_type=str(market_type),
+                    strategy_id=int(strategy_id),
+                    proposed_symbol=str(symbol),
+                    proposed_side=str(pos_side),
+                    proposed_quantity=float(amount or 0.0),
+                    proposed_price=float(ref_price or 0.0),
+                    proposed_leverage=float(leverage or 1.0),
+                    limits=account_risk_limits(cfg),
+                )
+                phases["account_risk"] = risk_snapshot
+                if not risk_snapshot.get("allowed"):
+                    violations = list(risk_snapshot.get("violations") or [])
+                    error = str(violations[0] if violations else "accountRisk.rejected")
+                    self._mark_failed(order_id=order_id, error=error)
+                    _notify_live_best_effort(status="failed", error=error)
+                    append_strategy_log(
+                        strategy_id,
+                        "error",
+                        f"Order rejected by account risk controls: {','.join(violations)}",
+                    )
+                    return
+            except Exception as e:
+                error = f"accountRisk.snapshotFailed:{e}"
+                self._mark_failed(order_id=order_id, error=error)
+                _notify_live_best_effort(status="failed", error=error)
+                append_strategy_log(strategy_id, "error", "Order rejected because account risk could not be verified")
+                return
 
         # Close/reduce: cap to DB size; if DB empty, fall back to live exchange position.
         if reduce_only:
@@ -1318,21 +1785,31 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
             except Exception:
                 pass
 
-        # Binance Futures leverage is per-symbol on the exchange side.
-        # If we do not set it, Binance may keep default 1x and the user will observe
-        # margin ~= notional (i.e., "margin = invested * leverage" when we sized using leverage).
-        if isinstance(client, BinanceFuturesClient) and market_type == "swap":
+        if market_type == "swap":
             try:
-                client.set_leverage(symbol=str(symbol), leverage=float(leverage or 1.0))
-                phases["set_leverage"] = {"exchange": "binance", "symbol": str(symbol), "leverage": float(leverage or 1.0)}
+                from app.services.live_trading.account_configuration import configure_derivatives_account
+
+                margin_mode = str(
+                    payload.get("margin_mode")
+                    or payload.get("marginMode")
+                    or cfg.get("margin_mode")
+                    or cfg.get("marginMode")
+                    or "cross"
+                )
+                phases["account_configuration"] = configure_derivatives_account(
+                    client,
+                    exchange_id=exchange_id,
+                    symbol=str(symbol),
+                    leverage=float(leverage or 1.0),
+                    margin_mode=margin_mode,
+                )
             except Exception as e:
-                # Safer default: do NOT place orders with an unintended leverage.
-                err = f"binance_set_leverage_failed:{e}"
+                err = f"derivatives_account_configuration_failed:{e}"
                 logger.warning(f"live leverage set failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
                 self._mark_failed(order_id=order_id, error=err)
                 _console_print(f"[worker] order rejected: strategy_id={strategy_id} pending_id={order_id} {err}")
                 _notify_live_best_effort(status="failed", error=err, amount_hint=amount, price_hint=ref_price)
-                append_strategy_log(strategy_id, "error", f"Binance set leverage failed for {symbol}: {e}")
+                append_strategy_log(strategy_id, "error", f"Leverage or margin-mode setup failed for {symbol}: {e}")
                 return
 
         fills = FillAccumulator()
@@ -1644,6 +2121,41 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     f"Fill recovered ({rec_src}): {signal_type} {symbol} qty={rec_filled:.6f} @ ~{avg_final:.4f}",
                 )
 
+        if filled_final > 0 and avg_final > 0:
+            try:
+                native_protection = self._attach_native_protection(
+                    client=client,
+                    payload=payload,
+                    symbol=str(symbol),
+                    signal_type=str(signal_type),
+                    quantity=filled_final,
+                    entry_price=avg_final,
+                    exchange_config=exchange_config,
+                    market_type=str(market_type),
+                    client_order_id=f"qdprot{order_id}",
+                )
+                if native_protection:
+                    phases["native_protection"] = native_protection
+                    append_strategy_log(
+                        strategy_id,
+                        "info",
+                        f"Native protection attached: {symbol} orders={len(native_protection)}",
+                    )
+            except Exception as e:
+                phases["native_protection_error"] = str(e)
+                logger.error(
+                    "Native protection failed pending_id=%s strategy_id=%s symbol=%s: %s",
+                    order_id,
+                    strategy_id,
+                    symbol,
+                    e,
+                )
+                append_strategy_log(
+                    strategy_id,
+                    "error",
+                    f"Native protection placement failed; runtime protection remains active: {symbol}: {e}",
+                )
+
         res = type("Tmp", (), {"exchange_id": str(exchange_config.get("exchange_id") or ""), "exchange_order_id": str(market_order_id or limit_order_id), "raw": phases, "filled": filled_final, "avg_price": avg_final})()
 
         executed_at = int(time.time())
@@ -1671,6 +2183,25 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         # Record trade + update local position snapshot (best-effort).
         try:
             if filled > 0 and avg_price > 0:
+                from app.services.live_trading.fee_quote import fee_to_quote
+
+                phases["fee_breakdown"] = dict(fills.fees_by_ccy)
+                commission_quote = 0.0
+                commission_quote_known = True
+                for fee_currency, fee_amount in fills.fees_by_ccy.items():
+                    converted = fee_to_quote(
+                        client,
+                        symbol=str(symbol),
+                        fee=float(fee_amount or 0.0),
+                        fee_ccy="" if fee_currency == "UNKNOWN" else fee_currency,
+                        fill_price=float(avg_price),
+                    )
+                    if converted is None:
+                        commission_quote_known = False
+                        break
+                    commission_quote += converted
+                if not commission_quote_known:
+                    commission_quote = None
                 logger.info(
                     f"live record begin: pending_id={order_id} strategy_id={strategy_id} symbol={symbol} "
                     f"signal={signal_type} filled={filled} avg_price={avg_price} fee={fills.total_fee} fee_ccy={fills.fee_ccy}"
@@ -1688,10 +2219,10 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                         fill_source="worker",
                         commission=float(fills.total_fee or 0.0),
                         commission_ccy=str(fills.fee_ccy or "").strip().upper(),
+                        commission_quote=commission_quote,
                         close_reason=_close_reason,
                         strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
                         order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
-                        basket_id=str(payload.get("basket_id") or ""),
                         exchange_id=str(res.exchange_id or ""),
                         exchange_order_id=str(res.exchange_order_id or ""),
                         raw_fill=post_query or {},
@@ -1746,10 +2277,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         """
         Execute order via Interactive Brokers for US stocks.
 
-        Simplified flow compared to crypto (no maker->market fallback):
-        - Place market order directly
-        - Wait for fill
-        - Record trade
+        Supports market/limit entries and native attached protection orders.
         """
         signal_type = payload.get("signal_type") or order_row.get("signal_type")
         symbol = payload.get("symbol") or order_row.get("symbol")
@@ -1758,17 +2286,9 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
 
         sig = str(signal_type or "").strip().lower()
 
-        # Stocks: no short selling in basic implementation
-        if "short" in sig:
-            self._mark_failed(order_id=order_id, error="ibkr_stock_short_not_supported")
-            _console_print(f"[worker] IBKR order rejected: strategy_id={strategy_id} pending_id={order_id} short not supported")
-            _notify_live_best_effort(status="failed", error="ibkr_stock_short_not_supported")
-            return
-
-        # Map signal to action (include stop/tp/trailing aliases)
-        if sig in ("open_long", "add_long"):
+        if sig in ("open_long", "add_long", "close_short", "reduce_short", "close_short_stop", "close_short_profit", "close_short_trailing"):
             action = "buy"
-        elif sig in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing"):
+        elif sig in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing", "open_short", "add_short"):
             action = "sell"
         else:
             self._mark_failed(order_id=order_id, error=f"ibkr_unsupported_signal:{signal_type}")
@@ -1786,13 +2306,38 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         ).strip()
 
         try:
-            # Place market order via IBKR
-            result = client.place_market_order(
-                symbol=symbol,
-                side=action,
-                quantity=amount,
-                market_type=market_type,
+            order_type, limit_price = _broker_order_type(payload, ref_price)
+            protection_ref = limit_price if order_type == "limit" else ref_price
+            stop_price, take_price = _broker_protection_prices(
+                payload,
+                signal_type=str(signal_type or ""),
+                entry_price=protection_ref,
             )
+            if stop_price > 0 or take_price > 0:
+                result = client.place_bracket_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=amount,
+                    take_profit_price=take_price,
+                    stop_loss_price=stop_price,
+                    limit_price=limit_price if order_type == "limit" else 0.0,
+                    market_type=market_type,
+                )
+            elif order_type == "limit":
+                result = client.place_limit_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=amount,
+                    price=limit_price,
+                    market_type=market_type,
+                )
+            else:
+                result = client.place_market_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=amount,
+                    market_type=market_type,
+                )
 
             if not result.success:
                 self._mark_failed(order_id=order_id, error=f"ibkr_order_failed:{result.message}")
@@ -1804,6 +2349,15 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
             filled = float(result.filled or 0.0)
             avg_price = float(result.avg_price or 0.0)
             exchange_order_id = str(result.order_id or "")
+            commission, commission_ccy = _commission_snapshot(result.raw)
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=str(symbol),
+                fee=commission,
+                fee_ccy=commission_ccy,
+                fill_price=avg_price,
+            )
 
             executed_at = int(time.time())
 
@@ -1838,10 +2392,12 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                         market_type=str(market_type or "USStock"),
                         order_id=int(order_id),
                         fill_source="worker_ibkr",
+                        commission=commission,
+                        commission_ccy=commission_ccy,
+                        commission_quote=commission_quote,
                         close_reason=trade_close_reason_from_payload(payload, str(signal_type)),
                         strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
                         order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
-                        basket_id=str(payload.get("basket_id") or ""),
                         exchange_id="ibkr",
                         exchange_order_id=str(exchange_order_id or ""),
                         raw_fill=result.raw or {},
@@ -1889,8 +2445,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         """
         Execute order via Alpaca for US stocks (USStock) or crypto.
 
-        Mirrors `_execute_ibkr_order`: market order, brief poll for fill,
-        record trade, mark sent. Long-only; short signals are rejected.
+        Supports market/limit orders and Alpaca equity bracket protection.
         """
         signal_type = payload.get("signal_type") or order_row.get("signal_type")
         symbol = payload.get("symbol") or order_row.get("symbol")
@@ -1899,15 +2454,9 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
 
         sig = str(signal_type or "").strip().lower()
 
-        if "short" in sig:
-            self._mark_failed(order_id=order_id, error="alpaca_short_not_supported")
-            _console_print(f"[worker] Alpaca order rejected: strategy_id={strategy_id} pending_id={order_id} short not supported")
-            _notify_live_best_effort(status="failed", error="alpaca_short_not_supported")
-            return
-
-        if sig in ("open_long", "add_long"):
+        if sig in ("open_long", "add_long", "close_short", "reduce_short", "close_short_stop", "close_short_profit", "close_short_trailing"):
             action = "buy"
-        elif sig in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing"):
+        elif sig in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing", "open_short", "add_short"):
             action = "sell"
         else:
             self._mark_failed(order_id=order_id, error=f"alpaca_unsupported_signal:{signal_type}")
@@ -1919,14 +2468,42 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         # strategy's market_category (USStock by default).
         mc = (market_category or "USStock").strip()
         market_type_for_client = "crypto" if mc.lower() in ("crypto", "cryptocurrency") else "USStock"
+        if market_type_for_client == "crypto" and "short" in sig:
+            self._mark_failed(order_id=order_id, error="alpaca_crypto_short_not_supported")
+            _notify_live_best_effort(status="failed", error="alpaca_crypto_short_not_supported")
+            return
 
         try:
-            result = client.place_market_order(
-                symbol=symbol,
-                side=action,
-                quantity=amount,
-                market_type=market_type_for_client,
+            order_type, limit_price = _broker_order_type(payload, ref_price)
+            protection_ref = limit_price if order_type == "limit" else ref_price
+            stop_price, take_price = _broker_protection_prices(
+                payload,
+                signal_type=str(signal_type or ""),
+                entry_price=protection_ref,
             )
+            protection_kwargs = {}
+            if market_type_for_client == "USStock" and (stop_price > 0 or take_price > 0):
+                protection_kwargs = {
+                    "stop_loss_price": stop_price,
+                    "take_profit_price": take_price,
+                }
+            if order_type == "limit":
+                result = client.place_limit_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=amount,
+                    price=limit_price,
+                    market_type=market_type_for_client,
+                    **protection_kwargs,
+                )
+            else:
+                result = client.place_market_order(
+                    symbol=symbol,
+                    side=action,
+                    quantity=amount,
+                    market_type=market_type_for_client,
+                    **protection_kwargs,
+                )
 
             if not result.success:
                 self._mark_failed(order_id=order_id, error=f"alpaca_order_failed:{result.message}")
@@ -1938,6 +2515,15 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
             filled = float(result.filled or 0.0)
             avg_price = float(result.avg_price or 0.0)
             exchange_order_id = str(result.order_id or "")
+            commission, commission_ccy = _commission_snapshot(result.raw)
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=str(symbol),
+                fee=commission,
+                fee_ccy=commission_ccy,
+                fill_price=avg_price,
+            )
 
             if avg_price <= 0 and ref_price > 0:
                 if filled > 0:
@@ -1982,10 +2568,12 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                         market_type=str(market_type_for_client or "USStock"),
                         order_id=int(order_id),
                         fill_source="worker_alpaca",
+                        commission=commission,
+                        commission_ccy=commission_ccy,
+                        commission_quote=commission_quote,
                         close_reason=trade_close_reason_from_payload(payload, str(signal_type)),
                         strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
                         order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
-                        basket_id=str(payload.get("basket_id") or ""),
                         exchange_id="alpaca",
                         exchange_order_id=str(exchange_order_id or ""),
                         raw_fill=result.raw or {},
@@ -2031,6 +2619,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         executed_at: Optional[int] = None,
         final_filled: bool = False,
     ) -> None:
+        exchange_response_json = _redact_exchange_json(exchange_response_json)
         with get_db_connection() as db:
             cur = db.cursor()
             # Use NOW() for timestamp fields; executed_at is set to NOW() if provided, else NULL
@@ -2083,6 +2672,9 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
             cur.close()
 
     def _mark_failed(self, order_id: int, error: str) -> None:
+        from app.services.live_trading.partner_attribution import redact_partner_attribution
+
+        error = str(redact_partner_attribution(str(error or "failed")))
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(

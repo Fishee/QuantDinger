@@ -1,604 +1,693 @@
-# QuantDinger 策略开发指南
+# Strategy API V2 策略开发指南
 
-本文定义当前版本 QuantDinger 的可执行策略开发契约。这里的“策略”指 **ScriptStrategy**：能进入回测中心、创建实盘、产生订单意图并参与市场发布审核的 Python 脚本。
+> 适用范围：当前 QuantDinger 可执行策略契约 Strategy API V2
+> 面向读者：第一次编写策略的用户、指标转策略用户，以及需要同时覆盖回测与实盘的策略开发者
 
-如果你只想画均线、灯带、信号标记或区间，请看 [指标开发指南](./INDICATOR_DEV_GUIDE_CN.md)。指标不能下单，也不能直接回测。指标想交易时，必须先通过“AI 指标转策略”生成 ScriptStrategy，再回测验证。
+QuantDinger 只有一套当前可执行的 Python 策略契约：**Strategy API V2**。同一份源码会编译成策略清单，并由回测和实盘运行时共享标的、订阅、事件模型、订单意图、组合记账和保护规则。
 
----
+策略源码拥有市场、标的、周期、调度和交易逻辑。运行面板只提供日期、初始资金、交易成本、源码允许范围内的杠杆，以及用户参数；它不能改写源码声明的市场、标的或周期。
 
-## 1. 三条 AI 生成链路
-
-当前系统有三类核心提示词/契约：
-
-| 入口 | 生成什么 | 关键边界 |
-| --- | --- | --- |
-| 指标 AI 生成 | Chart Indicator | 只输出 `output` 图表结构，不下单 |
-| 首页 AI 策略快捷工具 | ScriptStrategy | 只讲策略运行时规则，直接生成可执行脚本 |
-| AI 指标转策略 | ScriptStrategy | 既理解指标视觉信号，又遵守策略运行时规则 |
-
-指标转策略不是简单复制指标代码。它要把视觉信号翻译成明确订单意图。例如 long-only 双均线指标中：
-
-- `Golden` / `buy` -> `open_long`
-- `Death` / `sell` -> `close_long`
-- 不是自动 `open_short`
-
-只有用户明确要求做空、双向或反转时，才生成 short 路径。
+图表指标是另一种产物。指标中的 plots、signals 和 layers 不能下单，必须先转换成 Strategy API V2。
 
 ---
 
-## 2. ScriptStrategy 基本结构
+## 1. 快速开始：最小可运行策略
 
-每个策略必须包含：
-
-```python
-"""
-Strategy Name
-One or two neutral sentences describing logic, markets, entries, exits, and risk controls.
+~~~python
+"""SPY 20-Day Moving Average
+Trades a long-only SPY regime from completed daily bars.
 """
 
-def on_init(ctx):
-    ...
-
-def on_bar(ctx, bar):
-    ...
-```
-
-规则：
-
-- 文件开头的三引号 docstring 第一行是策略名称。
-- 后续非空行是策略描述。
-- 不要把策略名称或描述做成 `ctx.param(...)`。
-- `on_init(ctx)` 初始化参数和状态。
-- `on_bar(ctx, bar)` 每根 bar 执行策略判断。
-
-`bar` 支持：
-
-```python
-bar["open"]
-bar["high"]
-bar["low"]
-bar["close"]
-bar["volume"]
-bar["timestamp"]
-```
-
-### 可选代码表头
-
-ScriptStrategy 的元数据分两层：
-
-- 文件开头的三引号 docstring 负责策略名称和策略简介。
-- 可选的 `# key: value` 表头只负责少量运行默认值。
-
-推荐结构：
-
-```python
-"""
-EMA Pullback Long
-Trades long pullbacks in an EMA uptrend with optional stop and take-profit controls.
-"""
-# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: engine
-
-def on_init(ctx):
-    ...
-```
-
-当前支持的表头：
-
-| 表头 | 可选值 | 含义 |
-| --- | --- | --- |
-| `# timeframe: 1D` | `1m`, `3m`, `5m`, `15m`, `30m`, `1H`, `4H`, `1D`, `1W` | 代码拥有的默认 K 线周期。回测/实盘快照中会覆盖已保存的面板配置。 |
-| `# kline_timeframe: 1D` | 同 `timeframe` | `timeframe` 的别名。 |
-| `# signal_timing: next_bar_open` | `next_bar_open`, `same_bar_close` | 信号执行时机。默认并推荐使用 `next_bar_open`。 |
-| `# exit_owner: engine` | `engine`, `strategy`, `indicator` | 是否允许服务端风控退出平仓。使用引擎托管的 `# @strategy` 风控注解时用 `engine` 或省略；`strategy` 兼容旧模板，当前运行时仍允许引擎风控；只有 `indicator` 会关闭服务端价格退出。 |
-
-规则：
-
-- symbol、market、交易方向、投入金额、杠杆不要写进表头，它们属于运行面板。
-- 不要随手写这些表头。缺省时由运行面板和保存配置决定。
-- 优先使用 `next_bar_open`，不要为了模拟下一根开盘成交而手写 `pending_signal` 延迟。
-- `same_bar_close` 更乐观，只在用户明确要求同 K 线成交时使用。
-- `signal_form` 和 `flip_mode` 是旧指标转换协议字段，新 ScriptStrategy 不建议继续依赖。
-
-### 代码拥有的风控注解
-
-`# @strategy ...` 注解在 ScriptStrategy 里仍然支持。它不是图表指标语法，也不是 `ctx.param(...)` 参数面板旋钮，而是“代码拥有的回测/实盘风控默认值”。回测快照会解析这些注解，并交给执行引擎消费。
-
-示例：
-
-```python
-# @strategy entryPct 1
-# @strategy stopLossPct 0.04
-# @strategy takeProfitPct 0.08
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.015
-# @strategy trailingActivationPct 0.03
-# @strategy maxHoldingBars 12
-# exit_owner: engine
-```
-
-当前支持的注解：
-
-| 注解 | 可选值 | 含义 |
-| --- | --- | --- |
-| `# @strategy entryPct 1` | `0.01` 到 `1` | 每次入场使用运行面板投入金额的比例。`1` 表示 100%。 |
-| `# @strategy stopLossPct 0.04` | `0` 到 `1` | 服务端止损比例。`0.04` 表示 4%。 |
-| `# @strategy takeProfitPct 0.08` | `0` 到 `5` | 服务端止盈比例。`0.08` 表示 8%。 |
-| `# @strategy trailingEnabled true` | `true` / `false` | 配合移动止损参数启用移动止损。 |
-| `# @strategy trailingStopPct 0.015` | `0` 到 `1` | 移动止损回撤距离。`0.015` 表示 1.5%。 |
-| `# @strategy trailingActivationPct 0.03` | `0` 到 `1` | 浮盈达到该比例后才启动移动止损。 |
-| `# @strategy maxHoldingBars 12` | 大于等于 `0` 的整数 | 最多持有多少根 K 线后由引擎退出。`0` 表示关闭。 |
-
-规则：
-
-- 只有当风控应该由代码自身拥有时，才写这些注解。
-- 所有百分比类值都用小数比例，不用整数百分比：4% 写 `0.04`，不要写 `4`。
-- 回测和实盘快照都会读取这些值。缺省时，除入场比例外，引擎托管风控默认关闭。
-- `exit_owner: engine` 允许引擎托管止损、止盈、移动止损、最大持仓 K 线退出。
-- `exit_owner: strategy` 是历史模板写法；当前运行时不会把它当成“关闭引擎风控”。新模板优先使用 `engine` 或省略。
-- `exit_owner: indicator` 是兼容旧指标转策略链路的高级开关，表示退出完全由代码产生的 `close_*` 意图负责，服务端价格退出不平仓。
-- 如果脚本自己实现硬止损、止盈、移动止损或分层退出，不要再写同类 `@strategy` 风控，避免引擎风控和脚本风控重复平仓。
-- 网格、DCA、马丁以“交易机器人”形式交付，但仍生成可编辑的标准策略代码。DCA 与马丁在 `on_bar` 中表达状态机；网格在 `on_init` 中通过 `ctx.configure_robot(...)` 声明配置，由宿主提供可靠的挂单、成交轮询和对账能力。
-- 不要把这些注解写进图表指标里。
-
----
-
-## 3. 产品面板和策略代码的分工
-
-运行面板负责：
-
-- symbol / market
-- 现货或合约
-- 交易方向：long / short / both
-- 投入金额
-- 杠杆
-- 账户、通知和实盘风控开关
-
-策略代码负责：
-
-- 入场、离场、加仓、减仓条件
-- 周期、阈值、倍数、层数、冷却期
-- 状态管理和防重复下单
-- 日志、篮子状态、风险逻辑
-
-不要把运行面板字段写成参数：
-
-```python
-# 错误
-ctx.direction = ctx.param("direction", "long")
-ctx.market_type = ctx.param("market_type", "swap")
-ctx.investment_amount = ctx.param("investment_amount", 1000)
-ctx.leverage = ctx.param("leverage", 3)
-ctx.base_notional = ctx.param("base_notional", 50)
-```
-
-需要时读取运行上下文：
-
-```python
-direction = ctx.direction
-market_type = ctx.market_type
-budget = float(ctx.investment_amount or 0)
-leverage = float(ctx.leverage or 1)
-```
-
-### 回测与实盘运行心智
-
-专业策略链路是：
-
-```text
-ScriptStrategy Code
-    -> ScriptBacktestRunner
-    -> BacktestContext
-    -> BrokerSimulator
-    -> Trades / Equity Curve / Audit / Replay
-```
-
-回测中，策略代码每根 K 线运行一次。默认 `signal_timing: next_bar_open` 时，第 N 根已确认 K 线产生的订单，会在第 N+1 根 K 线开盘交给 broker 成交；成交后 broker 立即更新现金、保证金、持仓、手续费、滑点和权益，下一根 K 线策略读到的是最新账户状态。
-
-实盘中有两个节奏：
-
-- 价格 tick：普通脚本策略默认约每 10 秒同步一次最新价，用于服务端止损、止盈、移动止损、订单状态和通知链路。可通过 `STRATEGY_TICK_INTERVAL_SEC` 调整。
-- K 线信号：严格模式默认开启，只在策略周期的 K 线收盘后加载新 K 线并计算一次信号，默认在周期边界后约 2 秒轮询，偏移由 `KLINE_BOUNDARY_POLL_OFFSET_SEC` 控制。
-
-例如用户在 10:20 启动 1H 策略，系统会先加载历史 K 线初始化；之后下一次新的已收盘 1H 信号检查发生在约 11:00:02，而不是 11:20。
-
-严格模式的含义：
-
-- 信号按已收盘 K 线确认，尽量和回测一致。
-- 止损、止盈、移动止损按最新价 tick 检查，不等 K 线收盘。
-- 同一根 K 线内，普通脚本策略有信号去重和状态机保护，避免“开仓后止损/止盈又在同一根 K 线反复开仓”。
-- 非严格模式会用当前价格更新正在形成的 K 线并更频繁评估，响应更快，但结果可能和回测不同。只有用户明确需要盘中实时触发时才建议使用。
-
-### 核心上下文 API
-
-策略代码应只依赖这些核心上下文能力：
-
-| 类别 | API |
-| --- | --- |
-| 时间和市场 | `ctx.current_dt`, `ctx.symbol`, `ctx.market_type`, `ctx.direction`, `ctx.leverage` |
-| 账户 | `ctx.initial_capital`, `ctx.equity`, `ctx.available_cash`, `ctx.available_margin` |
-| 持仓 | `ctx.position`, `ctx.positions` |
-| 数据 | `ctx.bars(count)` |
-| 参数和状态 | `ctx.param(name, default)`, `ctx.state.get(name)`, `ctx.state.set(name, value)` |
-| 下单 | `ctx.open_long(...)`, `ctx.close_long(...)`, `ctx.open_short(...)`, `ctx.close_short(...)`, `ctx.order_value(...)`, `ctx.order_target(...)` |
-| 诊断 | `ctx.log(...)` |
-
----
-
-## 4. 参数契约
-
-在 `on_init(ctx)` 中声明策略参数：
-
-```python
-def on_init(ctx):
-    ctx.fast_period = ctx.param("fast_period", 12)
-    ctx.slow_period = ctx.param("slow_period", 36)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 0)
-    ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-    ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-```
-
-规则：
-
-- 每个 `ctx.param` 必须有默认值。
-- 不要在 `on_bar` 里反复读取 `ctx.param`。
-- 只把策略旋钮放进参数，不放 symbol、方向、投入金额、杠杆。
-- `*_pct` 使用 0-1 小数：`0.02 = 2%`，`0.8 = 80%`。
-- 默认风险项如果用户没有要求，应为 `0` 或关闭。
-
----
-
-## 5. 显式订单意图
-
-QuantDinger 策略使用显式意图：
-
-| 意图 | 含义 |
-| --- | --- |
-| `open_long` | 开多或创建多头腿 |
-| `close_long` | 平多，只平多，不开空 |
-| `open_short` | 开空或创建空头腿 |
-| `close_short` | 平空，只平空，不开多 |
-| `add_long` | 增加已有多头腿 |
-| `add_short` | 增加已有空头腿 |
-| `reduce_long` | 部分减少多头腿 |
-| `reduce_short` | 部分减少空头腿 |
-
-反转必须拆成两个动作：
-
-```text
-close_long -> open_short
-close_short -> open_long
-```
-
-只有用户明确要求反转/flip 时才写反转逻辑。不要把 `sell`、`close_long` 或 `Death` 自动解释成 `open_short`。
-
----
-
-## 6. Basket API
-
-推荐新策略优先使用 basket，因为 `notional` 表示计价货币金额，例如 USDT 金额，回测和实盘更容易保持一致。
-
-关键规则：
-
-- `ctx.basket(side)` 只能传 `"long"` 或 `"short"`。
-- 如果运行时对象暴露 `ctx.side`，它也只能保存 `"long"` 或 `"short"`，不要用 `"open"`、`"close"`、`"buy"`、`"sell"` 或 `"both"` 表示方向。
-- 不能传 `"buy"` 或 `"sell"`。
-- `open_child_order(...)` 必须每次显式传 `layer=` 和 `order=`。
-- `action` 只能是 `"open"`、`"add"`、`"reduce"`、`"close"`。
-
-映射关系：
-
-| side | action | 策略意图 |
-| --- | --- | --- |
-| long | open | `open_long` |
-| long | add | `add_long` |
-| long | reduce | `reduce_long` |
-| long | close | `close_long` |
-| short | open | `open_short` |
-| short | add | `add_short` |
-| short | reduce | `reduce_short` |
-| short | close | `close_short` |
-
-示例：
-
-```python
-ctx.basket("long").open_child_order(
-    layer=1,
-    order=1,
-    notional=quote_amount,
-    price=price,
-    action="open",
-    payload={"reason": "golden_cross"},
-)
-
-ctx.basket("long").open_child_order(
-    layer=1,
-    order=2,
-    notional=quote_amount,
-    price=price,
-    action="close",
-    payload={"reason": "death_cross"},
-)
-```
-
----
-
-## 7. 直接订单 API
-
-直接 API 适合简单策略：
-
-```python
-ctx.open_long(price=price, amount=base_qty, reason="entry")
-ctx.add_long(price=price, amount=base_qty, reason="scale_in")
-ctx.reduce_long(price=price, amount=base_qty, reason="partial_exit")
-ctx.close_long(price=price, reason="exit")
-
-ctx.open_short(price=price, amount=base_qty, reason="entry")
-ctx.add_short(price=price, amount=base_qty, reason="scale_in")
-ctx.reduce_short(price=price, amount=base_qty, reason="partial_exit")
-ctx.close_short(price=price, reason="exit")
-
-ctx.order_value(side="long", value=quote_amount, reason="budget_entry")
-ctx.order_target(side="long", target_value=target_quote_amount, reason="rebalance")
-```
-
-注意：
-
-- 直接 API 的 `amount` 是基础币数量，不是 USDT 金额。
-- `ctx.order_value(...)` 使用计价货币金额下单，适合按预算建仓。
-- `ctx.order_target(...)` 表示把目标方向调到指定计价货币敞口，适合再平衡。
-- 如果要按投入金额拆单，优先使用 basket 的 `notional`。
-- `ctx.buy()` / `ctx.sell()` 是简单方向语义，不适合加仓、反转和复杂脚本。
-- AI 生成策略应避免依赖 `ctx.buy()` / `ctx.sell()` 的自动语义。
-
----
-
-## 8. 状态管理
-
-有冷却、加仓、分层、止盈止损、重入限制的策略必须使用 `ctx.state`。
-
-常见状态：
-
-```python
-ctx.state.set("bar_index", current_bar)
-ctx.state.set("last_order_bar", current_bar)
-ctx.state.set("entry_price", price)
-ctx.state.set("layer", 1)
-ctx.state.set("pending_entry", False)
-ctx.state.set("cooldown_until", current_bar + ctx.cooldown_bars)
-```
-
-同一根 bar 防重复：
-
-```python
-bar_index = int(ctx.state.get("bar_index", -1) or -1) + 1
-ctx.state.set("bar_index", bar_index)
-
-last_order_bar = int(ctx.state.get("last_order_bar", -999999) or -999999)
-if last_order_bar == bar_index:
-    return
-
-# issue order...
-ctx.state.set("last_order_bar", bar_index)
-```
-
-不要把所有逻辑写成：
-
-```python
-if ctx.position.is_flat():
-    ...
-    return
-```
-
-如果策略需要加仓，持仓后仍然要执行 add / reduce / close 判断。
-
----
-
-## 9. 现货和合约
-
-现货：
-
-- 只支持 long。
-- 杠杆固定为 1。
-- short 意图会被拒绝。
-
-合约：
-
-- 支持 long / short / both。
-- 杠杆、资金费率、滑点和手续费由运行配置和回测中心处理。
-
-策略可以读取 `ctx.market_type` 和 `ctx.direction` 做保护，但不要把市场类型和方向硬编码为参数。
-
----
-
-## 10. 风控写法
-
-如果用户没有明确要求，止损止盈默认关闭：
-
-```python
-ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-```
-
-简单多头止损止盈：
-
-```python
-entry_price = float(ctx.state.get("entry_price", 0.0) or 0.0)
-if entry_price > 0 and ctx.position.has_long():
-    if ctx.stop_loss_pct > 0 and price <= entry_price * (1.0 - ctx.stop_loss_pct):
-        ctx.basket("long").open_child_order(
-            layer=1,
-            order=99,
-            notional=0,
-            price=price,
-            action="close",
-            payload={"reason": "stop_loss"},
+# @param period int 20 Moving-average period range=5:100:5
+# @param target_pct float 0.95 Target portfolio weight range=0.1:1.0:0.05
+
+
+def initialize(context):
+    g.symbol = "USStock:SPY"
+    context.set_universe([g.symbol])
+    context.subscribe(
+        frequency="1d",
+        fields=["open", "high", "low", "close", "volume"],
+    )
+    context.set_warmup(120)
+    context.set_benchmark("USStock:SPY")
+
+
+def handle_data(context, data):
+    period = int(context.params.get("period", 20))
+    target_pct = float(context.params.get("target_pct", 0.95))
+
+    bars = get_history(
+        period + 1,
+        "1d",
+        "close",
+        g.symbol,
+    )
+    if len(bars) < period:
+        return
+
+    price = float(bars["close"].iloc[-1])
+    average = float(bars["close"].tail(period).mean())
+    position = get_position(g.symbol)
+    desired = target_pct if price > average else 0.0
+
+    if desired > 0 and position.amount <= 0:
+        order_target_percent(
+            g.symbol,
+            desired,
+            reason="ma_long_entry",
+            stop_loss_pct=0.05,
         )
-        ctx.state.set("last_order_bar", bar_index)
-        return
-```
+    elif desired == 0 and position.amount > 0:
+        order_target_percent(
+            g.symbol,
+            0.0,
+            reason="ma_long_exit",
+        )
+~~~
 
-更复杂的移动止盈、分批止盈、保本止损需要明确状态字段，避免同一根 bar 重复发单。
+运行步骤：
+
+1. 在策略 IDE 新建脚本并粘贴源码。
+2. 保存源码。
+3. 调用验证或在界面点击验证，确认编译清单正确。
+4. 选择回测日期、初始资金、手续费、滑点和参数。
+5. 检查成交、已平仓交易、订单审计、权益曲线和持仓快照。
+6. 只有回测符合预期后才创建部署；新部署默认为停止状态。
 
 ---
 
-## 11. 指标转策略规则
+## 2. 编译器硬性要求与编写规范
 
-转换时必须先理解指标含义：
+编译器硬性要求：
 
-| 指标视觉信号 | 默认策略解释 |
+- 源码非空且能在安全沙箱中执行。
+- 必须定义 <code>initialize(context)</code>。
+- <code>initialize</code> 必须通过 <code>context.set_universe(...)</code> 声明静态标的、指数或命名股票池。
+- 如果未显式订阅，编译器会创建默认日线订阅；教程仍建议始终显式调用 <code>context.subscribe</code>。
+- 必须存在 <code>handle_data</code>、<code>on_rebalance</code>，或至少注册一个定时回调。
+- 杠杆策略必须满足 Crypto swap 专用规则。
+
+项目编写规范还要求：
+
+- 文件以三引号 docstring 开头；第一行是策略名称，后续说明标的、信号、调度和风控。
+- 标识符和源码注释使用英文。
+- 参数和交易原因使用稳定、可审计的名称。
+- 禁止未来数据、隐式反手、无界加仓和不受控仓位。
+
+<code>initialize</code> 在编译/清单发现阶段执行，用于声明配置和初始化 <code>g</code>。不要在这里请求行情、读取真实仓位或下单。
+
+---
+
+## 3. 源码拥有的策略清单
+
+编译后清单包含：
+
+- API 版本与源码哈希；
+- CTA 或 portfolio 类型；
+- 静态/动态 universe；
+- 订阅标的、周期和字段；
+- 定时任务；
+- benchmark；
+- 生命周期处理器；
+- 因子和基本面依赖；
+- warm-up 数量；
+- 是否允许杠杆及最大杠杆；
+- 自定义 metadata。
+
+验证接口：
+
+~~~http
+POST /api/strategies/verify
+Content-Type: application/json
+
+{"code": "...complete Strategy API V2 source..."}
+~~~
+
+成功响应会返回 <code>valid: true</code> 和 manifest。部署前必须重新验证最终保存的源码，不要只验证早期草稿。
+
+---
+
+## 4. 标的规范
+
+推荐使用规范标的：
+
+| 市场 | 示例 |
 | --- | --- |
-| `buy` / `Golden` / `Bullish` | long-only 下 `open_long` |
-| `sell` / `Death` / `Bearish exit` | long-only 下 `close_long` |
-| bearish short entry 明确存在 | 可生成 `open_short` |
-| 用户明确要求 reversal | `close_*` 后再 `open_*` |
-| 用户明确要求 add/reduce | 使用 `add_*` / `reduce_*` 或 basket action |
+| A 股 | <code>CNStock:600519.SH</code> |
+| 美股 | <code>USStock:MSFT</code> |
+| 港股 | <code>HKStock:00700.HK</code> |
+| Crypto 现货 | <code>Crypto:BTC/USDT@spot</code> |
+| 指定交易所 Crypto 现货 | <code>Crypto:BTC/USDT@okx:spot</code> |
+| Crypto 永续 | <code>Crypto:BTC/USDT@swap</code> |
+| 指定交易所 Crypto 永续 | <code>Crypto:BTC/USDT@okx:swap</code> |
 
-不要做这些事：
+系统也会规范化部分别名，例如 <code>600519.XSHG</code> → <code>CNStock:600519.SH</code>、<code>BTCUSDT</code> → <code>BTC/USDT</code>。
 
-- 把指标 `output` 原样放进策略。
-- 把 `sell` 直接写成 `ctx.basket("short").open_child_order(...)`。
-- 用 `ctx.basket("buy")` 或 `ctx.basket("sell")`。
-- 省略 `layer=` / `order=`。
-- 默默添加网格、DCA、马丁、加仓层、主动 TP/SL。
+为避免歧义，生产策略应写完整市场前缀。Crypto 未写市场类型时默认为 spot。只有 swap 可以启用合约杠杆。
 
 ---
 
-## 12. 完整示例：EMA 交叉 long-only 策略
+## 5. 静态和动态 universe
 
-```python
+静态单标的：
+
+~~~python
+context.set_universe(["USStock:SPY"])
+~~~
+
+静态多标的：
+
+~~~python
+context.set_universe([
+    "USStock:AAPL",
+    "USStock:MSFT",
+    "USStock:NVDA",
+])
+~~~
+
+指数 universe：
+
+~~~python
+context.set_universe(index="INDEX:SP500")
+members = get_index_stocks("INDEX:SP500")
+~~~
+
+平台命名股票池：
+
+~~~python
+context.set_universe(pool="sp500")
+members = get_universe_stocks()
+~~~
+
+动态 universe 在每个历史时点解析当时成分，避免直接把今天的成分复制进历史回测。不要把 pool 成分硬编码进源码。
+
+使用动态 universe、多个静态标的或 <code>on_rebalance</code> 时，清单通常分类为 portfolio；单一静态标的通常分类为 CTA。
+
+---
+
+## 6. 订阅、预热和 benchmark
+
+~~~python
+context.subscribe(
+    frequency="1d",
+    fields=["open", "high", "low", "close", "volume"],
+)
+context.set_warmup(260)
+context.set_benchmark("USStock:SPY")
+~~~
+
+要点：
+
+- 周期写在源码中，例如 <code>1m</code>、<code>5m</code>、<code>1h</code>、<code>4h</code>、<code>1d</code>、<code>1w</code>。
+- <code>daily</code>、<code>day</code>、<code>d</code> 等别名会规范化为 <code>1d</code>。
+- 未指定 symbols 时，订阅当前 universe。
+- <code>set_warmup</code> 告诉数据服务在回测开始日前额外获取历史数据；它不代表策略可以跳过 <code>len(bars)</code> 检查。
+- benchmark 只用于对比收益，不会自动交易。
+- <code>get_history</code> 的 frequency 参数用于 API 兼容；当前运行时从已订阅数据取历史，因此调用周期应与订阅周期保持一致。
+
+---
+
+## 7. 生命周期与调度
+
+支持的处理器：
+
+~~~python
+def initialize(context):
+    pass
+
+def before_trading_start(context, data):
+    pass
+
+def handle_data(context, data):
+    pass
+
+def on_rebalance(context, panel):
+    pass
+
+def after_trading_end(context, data):
+    pass
+~~~
+
+定时任务：
+
+~~~python
+def initialize(context):
+    context.set_universe(["USStock:SPY"])
+    context.subscribe(frequency="5m")
+    run_daily(rebalance, time="09:35")
+    run_weekly(weekly_review, weekday=1, time="09:40")
+    run_monthly(monthly_rebalance, monthday=1, time="09:45")
+~~~
+
+规则：
+
+- <code>weekday</code> 使用 1–7，1 为星期一。
+- 月度日期超出当月天数时会落在当月最后一天。
+- 日线及更低频率下，具体 <code>time</code> 不用于制造不存在的盘中 bar。
+- 回调推荐签名为 <code>callback(context, data)</code>；运行时也会适配只接收 context 的函数。
+- portfolio 策略如果没有定时任务，会调用 <code>on_rebalance</code>。
+- 当前引擎在每个事件时间戳调用 <code>before_trading_start</code> 和 <code>after_trading_end</code>；不要假设它们在分钟策略中每天只调用一次。
+
+---
+
+## 8. 最重要的时间语义
+
+回测只向策略暴露当时可见的数据：
+
+1. 进入新 bar 时，先执行上一 bar 收盘后排队的订单，成交参考当前 bar 开盘。
+2. <code>before_trading_start</code> 和到期的定时回调只看到前一根及更早的数据；其订单可以在当前开盘处理。
+3. 然后当前 bar 变为可见，调用 <code>handle_data</code>。
+4. <code>handle_data</code> 根据当前已完成 bar 产生的订单排队到下一根 bar 开盘。
+5. <code>after_trading_end</code> 同样能看到当前 bar；其新订单也等待下一根 bar。
+
+因此，“收盘确认、下一开盘成交”是默认的无未来执行模型。不要用负 shift 或未来行把成交提前。
+
+实盘会对每根已收盘 bar 只处理一次，并保留 <code>g</code> 状态。重复收到同一根 bar 不应重复触发策略。
+
+---
+
+## 9. context、data 和 g
+
+常用 context 字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| <code>context.params</code> | 本次运行参数 |
+| <code>context.current_dt</code> | 当前事件时间 |
+| <code>context.previous_trading_date</code> | 上一个事件时间 |
+| <code>context.portfolio.starting_cash</code> | 初始资金 |
+| <code>context.portfolio.available_cash</code> | 可用现金 |
+| <code>context.portfolio.total_value</code> | 当前总权益 |
+| <code>context.portfolio.positions</code> | 当前持仓字典 |
+| <code>context.data</code> | 数据视图 |
+
+<code>data.current(symbol, field)</code> 读取当前可见值；<code>data.history(symbols, count, fields)</code> 读取历史；<code>data[symbol]</code> 返回当前可见 DataFrame。
+
+跨回调状态放在 <code>g</code>：
+
+~~~python
+def initialize(context):
+    g.last_signal = ""
+    g.rebalance_count = 0
+~~~
+
+不要把用户状态放在文件、数据库或模块外部全局服务中。<code>g</code> 是单次运行的策略状态空间。
+
+---
+
+## 10. 参数
+
+~~~python
+# @param fast_period int 20 Fast moving-average period range=2:100:1
+# @param slow_period int 50 Slow moving-average period range=3:250:1
+# @param target_pct float 0.95 Target weight values=0.5,0.75,0.95
+# @param enabled bool true Enable entries
+~~~
+
+读取：
+
+~~~python
+fast_period = int(context.params.get("fast_period", 20))
+slow_period = int(context.params.get("slow_period", 50))
+target_pct = float(context.params.get("target_pct", 0.95))
+enabled = bool(context.params.get("enabled", True))
+~~~
+
+声明默认值和代码回退值必须一致。参数面板把用户值放入 <code>context.params</code>；若没有用户值，代码回退值是最后保障。
+
+标的、市场、周期和杠杆许可属于源码契约，不要把它们伪装成可由运行面板任意覆盖的普通参数。
+
+---
+
+## 11. 历史数据、因子和基本面
+
+单标的历史：
+
+~~~python
+bars = get_history(
+    60,
+    "1d",
+    ["open", "high", "low", "close", "volume"],
+    "USStock:SPY",
+)
+~~~
+
+一个标的返回 DataFrame；多个标的返回以规范标的为键的 DataFrame 字典：
+
+~~~python
+frames = data.history(
+    ["USStock:AAPL", "USStock:MSFT"],
+    count=30,
+    fields=["close", "volume"],
+)
+~~~
+
+技术指标和因子：
+
+~~~python
+rsi_value = factor("rsi", g.symbol, period=14)
+macd = indicator("MACD", g.symbol, fastperiod=12, slowperiod=26, signalperiod=9)
+scores = get_factors(symbols, ["momentum_20", "volatility_20"])
+~~~
+
+基本面：
+
+~~~python
+fundamentals = get_fundamentals(
+    ["PE", "PB", "ROE", "MARKET_CAP"],
+    symbols,
+)
+~~~
+
+常用公开别名还包括 <code>REVENUE_GROWTH</code>、<code>DEBT_TO_EQUITY</code> 和 <code>FREE_CASH_FLOW</code>。只使用平台真实支持、按时点可见的字段，不要发明字段或读取未来财报。
+
+多标的 <code>factor</code>/<code>indicator</code> 调用必须传 symbol；只有单标的数据门户可以省略 symbol。
+
+---
+
+## 12. 仓位与订单 API
+
+读取仓位：
+
+~~~python
+position = get_position(g.symbol)
+all_positions = get_positions()
+~~~
+
+Position 常用字段：
+
+- <code>symbol</code>
+- <code>amount</code>
+- <code>avg_cost</code>
+- <code>last_price</code>
+- <code>market_value</code>
+
+订单函数：
+
+| 函数 | 含义 |
+| --- | --- |
+| <code>order(symbol, amount)</code> | 增减指定数量 |
+| <code>order_value(symbol, value)</code> | 增减指定报价币价值 |
+| <code>order_target(symbol, amount)</code> | 把持仓调整到目标数量 |
+| <code>order_target_value(symbol, value)</code> | 调整到目标价值 |
+| <code>order_target_percent(symbol, percent)</code> | 调整到组合权益的目标比例 |
+
+目标型 API 最适合可重复执行的再平衡逻辑。每个订单都应提供稳定的 <code>reason</code>：
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.5,
+    reason="breakout_long_entry",
+)
+~~~
+
+现货和所有非 Crypto 市场当前按 long-only 编写。多头离场条件与空头入场条件必须独立；不要把 <code>target=0</code> 的离场自动改成负仓位。
+
+引擎会处理手续费、滑点、最小交易单位、成交量上限、涨跌停和停牌。被延迟或拒绝的订单会出现在订单审计账本中，不应从“没有成交”直接推断策略没有发单。
+
+---
+
+## 13. 止损、止盈、追踪和时间保护
+
+随开仓声明：
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.8,
+    reason="breakout_long_entry",
+    stop_loss_pct=0.03,
+    take_profit_pct=0.08,
+    trailing_stop_pct=0.025,
+    trailing_activation_pct=0.02,
+    time_limit_seconds=86400 * 10,
+)
+~~~
+
+或设置后续开仓的默认保护：
+
+~~~python
+set_default_protection(
+    stop_loss_pct=0.03,
+    take_profit_pct=0.08,
+)
+~~~
+
+所有 pct 都使用小数比率，<code>0.03</code> 表示 3%。保护值会限制在安全范围内；负值按 0 处理。
+
+回测规则：
+
+- 跳空越过保护价时按可成交的 bar 开盘价处理。
+- bar 内触发按触发价处理。
+- 同一 bar 同时触发多个保护时，默认 conservative 模式优先止损，再追踪止损、时间限制、止盈。
+
+实盘使用独立价格时钟检查同样的保护语义，不必等待下一根策略 bar。保护状态会保存并可在会话重启后恢复。
+
+---
+
+## 14. 杠杆和做空
+
+只有 universe 中全部静态标的都是 Crypto swap 时，源码才能声明：
+
+~~~python
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT@okx:swap"
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1h")
+    context.allow_leverage(max_leverage=5)
+~~~
+
+规则：
+
+- Crypto spot、股票、指数/股票池和其他非 Crypto 市场不能调用 <code>allow_leverage</code>。
+- 动态 universe 不能启用合约杠杆。
+- 回测或部署选择的杠杆不能超过源码声明的最大值。
+- 源码没有许可时，运行面板不能强制开启杠杆。
+- 用户选择的杠杆由运行时应用，不要再在订单金额中手工乘一次。
+- 做空只应出现在 swap 策略中，并且必须有独立的空头入场、空头离场和风险规则。
+
+---
+
+## 15. 完整 CTA 教程：双 EMA 趋势策略
+
+~~~python
+"""Dual EMA Long Trend
+Trades a long-only daily SPY trend with a protected entry and next-open fills.
 """
-Dual EMA Long Strategy
-Long-only EMA crossover strategy. Golden crosses open a long position, death crosses close the long position, and optional stop/take-profit defaults are off.
+
+# @param fast_period int 20 Fast EMA period range=5:80:5
+# @param slow_period int 50 Slow EMA period range=20:250:10
+# @param target_pct float 0.95 Target portfolio weight range=0.1:1.0:0.05
+# @param stop_loss_pct float 0.05 Entry stop-loss ratio range=0.01:0.15:0.01
+
+
+def initialize(context):
+    g.symbol = "USStock:SPY"
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1d")
+    context.set_warmup(300)
+    context.set_benchmark("USStock:SPY")
+
+
+def handle_data(context, data):
+    fast_period = int(context.params.get("fast_period", 20))
+    slow_period = int(context.params.get("slow_period", 50))
+    target_pct = float(context.params.get("target_pct", 0.95))
+    stop_loss_pct = float(context.params.get("stop_loss_pct", 0.05))
+
+    if fast_period >= slow_period:
+        log.warning("fast_period must be smaller than slow_period")
+        return
+
+    bars = get_history(
+        slow_period + 2,
+        "1d",
+        "close",
+        g.symbol,
+    )
+    if len(bars) < slow_period + 1:
+        return
+
+    close = bars["close"]
+    fast_now = float(close.ewm(span=fast_period, adjust=False).mean().iloc[-1])
+    slow_now = float(close.ewm(span=slow_period, adjust=False).mean().iloc[-1])
+    position = get_position(g.symbol)
+
+    if fast_now > slow_now and position.amount <= 0:
+        order_target_percent(
+            g.symbol,
+            target_pct,
+            reason="dual_ema_long_entry",
+            stop_loss_pct=stop_loss_pct,
+        )
+    elif fast_now < slow_now and position.amount > 0:
+        order_target_percent(
+            g.symbol,
+            0.0,
+            reason="dual_ema_long_exit",
+        )
+~~~
+
+为什么这样写：
+
+- universe、周期和 benchmark 都在源码中。
+- warm-up 覆盖慢 EMA，但仍检查实际数据长度。
+- 快慢周期错误时直接停止本 bar。
+- 入场与离场互斥，死叉只平多，不开空。
+- 读取当前已完成日线后发单，下一根开盘成交。
+- 只有入场附带保护，离场目标为 0。
+
+---
+
+## 16. Portfolio 教程：每周因子再平衡
+
+~~~python
+"""S&P 500 Momentum Basket
+Selects the strongest five point-in-time pool members and rebalances weekly.
 """
 
-def on_init(ctx):
-    ctx.fast_period = ctx.param("fast_period", 12)
-    ctx.slow_period = ctx.param("slow_period", 26)
-    ctx.order_pct = ctx.param("order_pct", 1.0)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 0)
-    ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-    ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-    ctx.state.set("bar_index", -1)
-    ctx.state.set("last_order_bar", -999999)
-    ctx.state.set("entry_price", 0.0)
+# @param holdings int 5 Number of holdings range=3:20:1
+# @param max_weight float 0.18 Maximum weight per holding range=0.05:0.3:0.01
 
-def _ema(values, period):
-    if not values:
-        return []
-    alpha = 2.0 / (float(period) + 1.0)
-    out = []
-    ema = None
-    for value in values:
-        price = float(value)
-        ema = price if ema is None else alpha * price + (1.0 - alpha) * ema
-        out.append(ema)
-    return out
 
-def _quote_amount(ctx):
-    try:
-        budget = float(ctx.investment_amount or 0.0)
-    except Exception:
-        budget = 0.0
-    pct = max(0.0, min(1.0, float(ctx.order_pct or 0.0)))
-    return budget * pct
+def initialize(context):
+    context.set_universe(pool="sp500")
+    context.subscribe(frequency="1d")
+    context.set_warmup(80)
+    context.set_benchmark("USStock:SPY")
+    run_weekly(rebalance, weekday=1, time="09:35")
 
-def on_bar(ctx, bar):
-    bar_index = int(ctx.state.get("bar_index", -1) or -1) + 1
-    ctx.state.set("bar_index", bar_index)
 
-    price = float(bar["close"])
-    history = ctx.bars(max(int(ctx.slow_period) + 3, 5))
-    closes = [float(item["close"]) for item in history]
-    if len(closes) < max(int(ctx.fast_period), int(ctx.slow_period)) + 2:
+def rebalance(context, data):
+    holdings = int(context.params.get("holdings", 5))
+    max_weight = float(context.params.get("max_weight", 0.18))
+    symbols = get_universe_stocks()
+    if len(symbols) < holdings:
         return
 
-    fast = _ema(closes, int(ctx.fast_period))
-    slow = _ema(closes, int(ctx.slow_period))
-    golden = fast[-1] > slow[-1] and fast[-2] <= slow[-2]
-    death = fast[-1] < slow[-1] and fast[-2] >= slow[-2]
-
-    last_order_bar = int(ctx.state.get("last_order_bar", -999999) or -999999)
-    if last_order_bar == bar_index:
-        return
-    cooldown_until = int(ctx.state.get("cooldown_until", -1) or -1)
-    if cooldown_until >= bar_index:
+    scores = get_factors(symbols, "momentum_20")
+    if scores.empty or "momentum_20" not in scores.columns:
         return
 
-    entry_price = float(ctx.state.get("entry_price", 0.0) or 0.0)
-
-    if ctx.position.has_long() and entry_price > 0:
-        if ctx.stop_loss_pct > 0 and price <= entry_price * (1.0 - float(ctx.stop_loss_pct)):
-            ctx.basket("long").open_child_order(layer=1, order=90, notional=0, price=price, action="close", payload={"reason": "stop_loss"})
-            ctx.state.set("last_order_bar", bar_index)
-            return
-        if ctx.take_profit_pct > 0 and price >= entry_price * (1.0 + float(ctx.take_profit_pct)):
-            ctx.basket("long").open_child_order(layer=1, order=91, notional=0, price=price, action="close", payload={"reason": "take_profit"})
-            ctx.state.set("last_order_bar", bar_index)
-            return
-
-    if golden and not ctx.position.has_long():
-        quote = _quote_amount(ctx)
-        if quote > 0:
-            ctx.basket("long").open_child_order(layer=1, order=1, notional=quote, price=price, action="open", payload={"reason": "golden_cross"})
-            ctx.state.set("entry_price", price)
-            ctx.state.set("last_order_bar", bar_index)
-            if int(ctx.cooldown_bars or 0) > 0:
-                ctx.state.set("cooldown_until", bar_index + int(ctx.cooldown_bars))
+    ranked = scores["momentum_20"].dropna().sort_values(ascending=False)
+    selected = list(ranked.head(holdings).index)
+    if not selected:
         return
 
-    if death and ctx.position.has_long():
-        ctx.basket("long").open_child_order(layer=1, order=2, notional=0, price=price, action="close", payload={"reason": "death_cross"})
-        ctx.state.set("entry_price", 0.0)
-        ctx.state.set("last_order_bar", bar_index)
-```
+    target_weight = min(max_weight, 0.95 / len(selected))
+    current = get_positions()
+
+    for symbol in current:
+        if symbol not in selected:
+            order_target_percent(symbol, 0.0, reason="weekly_remove")
+
+    for symbol in selected:
+        order_target_percent(symbol, target_weight, reason="weekly_select")
+~~~
+
+此类策略必须使用按时点解析的 universe 和因子数据。回测还要关注覆盖率、幸存者偏差、换手、交易成本、最小交易单位和无法成交订单。
 
 ---
 
-## 13. 发布和回测要求
+## 17. 回测、结果和诊断
 
-策略可以保存多个版本。为了避免市场里出现未经验证的代码，发布规则是：
+回测请求的核心字段：
 
-- 代码必须保存为 Script Source。
-- 策略必须至少有一条成功回测记录。
-- 未回测成功时，发布会被前端和后端拒绝。
-- 回测参数、市场、周期、标的和结果应能解释策略用途。
+~~~json
+{
+  "code": "...",
+  "startDate": "2024-01-01",
+  "endDate": "2025-12-31",
+  "initialCapital": 100000,
+  "commission": 0.0005,
+  "slippage": 0.0005,
+  "leverageEnabled": false,
+  "leverage": 1,
+  "params": {},
+  "persist": true
+}
+~~~
 
-发布前检查：
+还可以传 <code>sourceId</code> 或 <code>strategyId</code> 读取已保存源码。市场、标的和周期不能从请求覆盖。
 
-- 代码能通过校验。
-- 没有使用旧指标输出结构。
-- 没有把运行面板字段写成 `ctx.param`。
-- 没有把 `ctx.basket("buy")` / `ctx.basket("sell")` 写进代码。
-- 所有 `open_child_order` 都有 `layer=` 和 `order=`。
-- 现货策略没有 short 意图。
-- sell/death 语义没有被误写成开空。
+重点检查：
+
+- <code>resultStatus</code>：<code>no_signals</code>、<code>open_position_only</code> 或 <code>completed_trades</code>。
+- <code>totalExecutions</code>：实际成交次数。
+- <code>totalTrades</code>：已平仓交易次数，不等于成交次数。
+- <code>rawTrades</code>/<code>executions</code>：开仓、加仓、减仓、平仓成交。
+- <code>closedTrades</code>：完整往返交易。
+- <code>orderLedger</code>：成交、延迟、拒绝及原因。
+- <code>holdingSnapshots</code>、<code>rebalanceRecords</code>：组合过程。
+- <code>equityCurve</code>、回撤、胜率、Profit Factor 和 benchmark/excess return。
+- <code>dataProvenance</code> 和 <code>executionAssumptions</code>：数据来源与执行假设。
+
+零成交不一定是系统错误：可能是数据不足、条件从未触发、参数不合理、标的无数据或订单被拒绝。先看日志和 orderLedger。
 
 ---
 
-## 14. 常见校验提示
+## 18. 部署与实盘边界
 
-| 提示 | 含义 | 修复 |
+部署核心字段包括：
+
+- <code>sourceId</code>
+- <code>name</code>
+- <code>initialCapital</code>
+- <code>executionMode</code>：<code>signal</code> 或 <code>live</code>
+- 可选 <code>credentialId</code>、<code>params</code>、杠杆、仓位方向和通知配置
+
+部署创建后状态为 stopped，必须显式 start。删除前必须先停止。
+
+当前 live 账户边界：
+
+- Crypto live 需要受支持交易所凭证。
+- USStock live 需要 Alpaca 或 IBKR 凭证。
+- 混合市场 live 不支持。
+- 其他市场不能强行用不匹配的凭证部署。
+
+先用 signal 模式验证通知、信号频率和状态恢复，再考虑 live。回测通过不代表连接、余额、最小下单量、交易所规则和网络状态一定满足实盘。
+
+---
+
+## 19. 安全限制和常见失败
+
+策略运行在安全执行环境中。禁止文件、网络、数据库、进程、动态执行、反射和不安全导入。不要使用 <code>eval</code>、<code>exec</code>、<code>compile</code>、<code>open</code>、dunder 绕过或外部状态。
+
+常见编译错误：
+
+| 错误 | 含义 | 修复 |
 | --- | --- | --- |
-| `MISSING_ON_INIT` | 缺少 `on_init(ctx)` | 添加初始化函数 |
-| `MISSING_ON_BAR` | 缺少 `on_bar(ctx, bar)` | 添加逐 bar 函数 |
-| `CTX_PARAM_MISSING_DEFAULT` | `ctx.param` 没有默认值 | 写成 `ctx.param("name", default)` |
-| `CTX_PARAM_RUN_PANEL_FIELD` | 把运行面板字段声明成参数 | 改为读取 `ctx.direction` 等 |
-| `INDICATOR_OUTPUT_CONTRACT` | 策略里残留 `output/plots/signals` | 删除指标输出结构 |
-| `BASKET_CHILD_ORDER_MISSING_LAYER_ORDER` | 子订单缺少 `layer/order` | 显式传 `layer=` 和 `order=` |
-| `BASKET_SIDE_MUST_BE_LONG_OR_SHORT` | basket side 写错 | 只用 `"long"` 或 `"short"` |
+| <code>strategyV2.codeRequired</code> | 源码为空 | 提交完整源码 |
+| <code>strategyV2.initializeRequired</code> | 缺少 initialize | 添加初始化函数 |
+| <code>strategyV2.initializeFailed:...</code> | 初始化执行失败 | 只在 initialize 做声明和状态初始化 |
+| <code>strategyV2.universeRequired</code> | 未声明 universe | 调用 <code>set_universe</code> |
+| <code>strategyV2.handlerRequired</code> | 没有可执行处理器/定时任务 | 添加 handler 或 schedule |
+| <code>strategyV2.leverageCryptoSwapOnly</code> | 杠杆市场不合法 | 仅用于静态 Crypto swap |
+| <code>strategyV2.leverageNotAllowed</code> | 面板开了源码未许可的杠杆 | 源码合法许可或关闭杠杆 |
+| <code>strategyV2.leverageExceedsStrategyLimit</code> | 请求杠杆超过上限 | 降低请求值 |
+| <code>strategyV2.dataUnavailable:...</code> | 标的没有可用数据 | 检查规范标的和数据范围 |
+| <code>strategyV2.runtimeFailed:...</code> | 回调运行异常 | 根据处理器名和原始异常修复 |
 
 ---
 
-## 15. 最佳实践
+## 20. 发布前检查清单
 
-- 先用指标把想法看清楚，再转策略；复杂执行直接写 ScriptStrategy。
-- 默认模板应优先覆盖趋势、突破、均线、动量、均值回归、波动率止损等常见策略，不把网格、DCA、马丁作为普通策略模板。
-- 策略默认应保守，风险参数默认关闭或低风险。
-- 明确区分 open、add、reduce、close。
-- 反转必须拆成“先平再开”。
-- 加仓必须有层数上限、距离触发、冷却和止损。
-- 所有循环都应有明确 lookback，不写无限循环或无界列表。
-- 用日志说明重要状态变化，但不要刷屏。
-- 每次大改后保存新版本并重新回测。
+- [ ] 文件有英文 docstring，说明名称、universe、信号、调度和风控。
+- [ ] <code>initialize</code> 只声明 universe、订阅、预热、benchmark、调度、杠杆许可和初始 <code>g</code>。
+- [ ] 标的使用规范格式，Crypto 明确 spot/swap。
+- [ ] 源码拥有标的和周期，不依赖运行面板覆盖。
+- [ ] 参数默认值与代码回退值一致。
+- [ ] 所有历史窗口都检查长度。
+- [ ] 不使用未来行、负 shift 或居中 rolling。
+- [ ] 多头离场与空头入场独立。
+- [ ] 仓位有明确上限；网格、DCA、马丁和加仓层数有硬限制。
+- [ ] 订单都有可审计 reason。
+- [ ] 风险百分比使用小数比率。
+- [ ] 只对 Crypto swap 声明杠杆，且不重复乘杠杆。
+- [ ] 已验证 manifest。
+- [ ] 已检查 orderLedger，而不只看收益曲线。
+- [ ] 已用不同时间区间和成本假设做稳健性测试。
+- [ ] 已有至少一次成功回测后再发布。
+- [ ] live 前先确认凭证、市场、余额、最小交易单位和通知。

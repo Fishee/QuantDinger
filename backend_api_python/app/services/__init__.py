@@ -1,9 +1,4 @@
-"""Lazy application service exports.
-
-Importing a focused service must not eagerly load every market-data, AI, and
-experiment dependency. Public package exports remain backward compatible and
-are resolved only when requested.
-"""
+"""Lazy application service exports."""
 
 from __future__ import annotations
 
@@ -13,13 +8,7 @@ from typing import Any
 
 _EXPORTS = {
     "KlineService": ("app.services.kline", "KlineService"),
-    "UnifiedBacktestService": ("app.services.unified_backtest", "UnifiedBacktestService"),
-    "StrategyCompiler": ("app.services.strategy_compiler", "StrategyCompiler"),
     "FastAnalysisService": ("app.services.fast_analysis", "FastAnalysisService"),
-    "ExperimentRunnerService": ("app.services.experiment", "ExperimentRunnerService"),
-    "MarketRegimeService": ("app.services.experiment", "MarketRegimeService"),
-    "StrategyEvolutionService": ("app.services.experiment", "StrategyEvolutionService"),
-    "StrategyScoringService": ("app.services.experiment", "StrategyScoringService"),
 }
 
 __all__ = list(_EXPORTS)

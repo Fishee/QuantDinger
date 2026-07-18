@@ -298,32 +298,25 @@ CREATE TABLE IF NOT EXISTS qd_strategies_trading (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL DEFAULT 1 REFERENCES qd_users(id) ON DELETE CASCADE,
     strategy_name VARCHAR(255) NOT NULL,
-    strategy_type VARCHAR(50) DEFAULT 'ScriptStrategy',
+    strategy_type VARCHAR(50) DEFAULT 'StrategyV2',
     market_category VARCHAR(50) DEFAULT 'Crypto',
-    execution_mode VARCHAR(20) DEFAULT 'script',
-    notification_config TEXT DEFAULT '',
+    execution_mode VARCHAR(20) NOT NULL DEFAULT 'signal',
+    notification_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     status VARCHAR(20) DEFAULT 'stopped',
     symbol VARCHAR(50),
+    symbol_canonical VARCHAR(50) DEFAULT '',
     timeframe VARCHAR(10),
     initial_capital DECIMAL(20,8) DEFAULT 1000,
     leverage INTEGER DEFAULT 1,
     market_type VARCHAR(20) DEFAULT 'swap',
-    exchange_config TEXT,
-    indicator_config TEXT,
-    trading_config TEXT,
-    ai_model_config TEXT,
-    decide_interval INTEGER DEFAULT 300,
-    strategy_group_id VARCHAR(100) DEFAULT '',
-    group_base_name VARCHAR(255) DEFAULT '',
-    strategy_mode VARCHAR(20) DEFAULT 'script',
-    strategy_code TEXT DEFAULT '',
+    exchange_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    trading_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_strategies_user_id ON qd_strategies_trading(user_id);
 CREATE INDEX IF NOT EXISTS idx_strategies_status ON qd_strategies_trading(status);
-CREATE INDEX IF NOT EXISTS idx_strategies_group_id ON qd_strategies_trading(strategy_group_id);
 
 -- Script source library: reusable code assets separated from live/runtime strategy rows.
 CREATE TABLE IF NOT EXISTS qd_script_sources (
@@ -346,33 +339,48 @@ CREATE TABLE IF NOT EXISTS qd_script_sources (
 
 CREATE INDEX IF NOT EXISTS idx_script_sources_user_id ON qd_script_sources(user_id);
 CREATE INDEX IF NOT EXISTS idx_script_sources_marketplace ON qd_script_sources(source_marketplace_indicator_id);
-ALTER TABLE qd_script_sources ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) NOT NULL DEFAULT 'script';
 CREATE INDEX IF NOT EXISTS idx_script_sources_asset_type ON qd_script_sources(user_id, asset_type);
 
--- Add strategy_mode and strategy_code columns (script strategy support)
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'qd_strategies_trading' AND column_name = 'strategy_mode'
-    ) THEN
-        ALTER TABLE qd_strategies_trading ADD COLUMN strategy_mode VARCHAR(20) DEFAULT 'signal';
-        RAISE NOTICE 'Added strategy_mode column to qd_strategies_trading';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'qd_strategies_trading' AND column_name = 'strategy_code'
-    ) THEN
-        ALTER TABLE qd_strategies_trading ADD COLUMN strategy_code TEXT DEFAULT '';
-        RAISE NOTICE 'Added strategy_code column to qd_strategies_trading';
-    END IF;
-END$$;
+CREATE TABLE IF NOT EXISTS qd_script_source_versions (
+    id SERIAL PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES qd_script_sources(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    version_no INTEGER NOT NULL,
+    name VARCHAR(255) NOT NULL DEFAULT '',
+    description TEXT DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    template_key VARCHAR(80) DEFAULT '',
+    param_schema JSONB DEFAULT '{}'::jsonb,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(source_id, version_no)
+);
 
-DO $$
-BEGIN
-    ALTER TABLE qd_strategies_trading DROP COLUMN IF EXISTS last_rebalance_at;
-    RAISE NOTICE 'Dropped obsolete last_rebalance_at column from qd_strategies_trading';
-END$$;
+CREATE INDEX IF NOT EXISTS idx_script_source_versions_source
+ON qd_script_source_versions(source_id, version_no DESC);
+CREATE INDEX IF NOT EXISTS idx_script_source_versions_user
+ON qd_script_source_versions(user_id);
+
+CREATE TABLE IF NOT EXISTS qd_script_templates (
+    id SERIAL PRIMARY KEY,
+    template_key VARCHAR(80) UNIQUE NOT NULL,
+    asset_type VARCHAR(40) NOT NULL DEFAULT 'script',
+    title VARCHAR(255) NOT NULL,
+    description TEXT DEFAULT '',
+    code TEXT NOT NULL DEFAULT '',
+    param_schema JSONB DEFAULT '{}'::jsonb,
+    tags JSONB DEFAULT '[]'::jsonb,
+    icon VARCHAR(64) DEFAULT 'appstore',
+    accent VARCHAR(32) DEFAULT 'blue',
+    sort_order INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_script_templates_active
+ON qd_script_templates(is_active, sort_order);
 
 -- =============================================================================
 -- 3. Strategy Positions
@@ -396,6 +404,7 @@ CREATE TABLE IF NOT EXISTS qd_strategy_positions (
     market_type VARCHAR(20) DEFAULT 'swap',
     credential_id INTEGER DEFAULT 0,
     inst_id VARCHAR(80) DEFAULT '',
+    strategy_run_id INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(strategy_id, symbol, side)
 );
@@ -419,6 +428,7 @@ CREATE TABLE IF NOT EXISTS qd_strategy_trades (
     value DECIMAL(20,8),
     commission DECIMAL(20,8) DEFAULT 0,
     commission_ccy VARCHAR(20) DEFAULT '',
+    commission_quote DECIMAL(24,8),
     profit DECIMAL(20,8) DEFAULT 0,
     close_reason VARCHAR(64) DEFAULT '',
     matched_entry_price DECIMAL(20,8) DEFAULT 0,
@@ -428,6 +438,8 @@ CREATE TABLE IF NOT EXISTS qd_strategy_trades (
     inst_id VARCHAR(80) DEFAULT '',
     fill_source VARCHAR(32) DEFAULT '',
     pending_order_id INTEGER DEFAULT 0,
+    strategy_run_id INTEGER DEFAULT 0,
+    order_intent_id INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -537,6 +549,9 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     symbol VARCHAR(50) NOT NULL,
     signal_type VARCHAR(30) NOT NULL,
     signal_ts BIGINT,
+    strategy_run_id INTEGER NOT NULL DEFAULT 0,
+    order_intent_id INTEGER NOT NULL DEFAULT 0,
+    idempotency_key VARCHAR(180) NOT NULL,
     market_type VARCHAR(20) DEFAULT 'swap',
     order_type VARCHAR(20) DEFAULT 'market',
     amount DECIMAL(20,8) DEFAULT 0,
@@ -550,6 +565,8 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     payload_json TEXT DEFAULT '',
     dispatch_note TEXT DEFAULT '',
     exchange_id VARCHAR(50) DEFAULT '',
+    credential_id INTEGER NOT NULL DEFAULT 0,
+    inst_id VARCHAR(80) NOT NULL DEFAULT '',
     exchange_order_id VARCHAR(100) DEFAULT '',
     exchange_response_json TEXT DEFAULT '',
     filled DECIMAL(20,8) DEFAULT 0,
@@ -561,9 +578,16 @@ CREATE TABLE IF NOT EXISTS pending_orders (
     sent_at TIMESTAMP
 );
 
+UPDATE pending_orders
+SET idempotency_key = 'pending-order-' || id::text
+WHERE idempotency_key IS NULL OR idempotency_key = '';
+ALTER TABLE pending_orders ALTER COLUMN idempotency_key SET NOT NULL;
+ALTER TABLE pending_orders ALTER COLUMN idempotency_key DROP DEFAULT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_orders_idempotency_key ON pending_orders(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_pending_orders_user_id ON pending_orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_pending_orders_status ON pending_orders(status);
 CREATE INDEX IF NOT EXISTS idx_pending_orders_strategy_id ON pending_orders(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_pending_orders_strategy_run_id ON pending_orders(strategy_run_id);
 
 -- =============================================================================
 -- 6. Strategy Notifications
@@ -839,12 +863,31 @@ CREATE TABLE IF NOT EXISTS qd_fundamental_snapshots (
     free_cash_flow DOUBLE PRECISION,
     shares_outstanding DOUBLE PRECISION,
     market_cap DOUBLE PRECISION,
+    pe_ratio DOUBLE PRECISION,
+    pb_ratio DOUBLE PRECISION,
+    return_on_equity DOUBLE PRECISION,
+    revenue_growth DOUBLE PRECISION,
+    debt_to_equity DOUBLE PRECISION,
     source VARCHAR(80) NOT NULL DEFAULT 'manual',
     source_version VARCHAR(120) NOT NULL DEFAULT '',
     metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (market, symbol, period_end, available_at, source)
 );
+
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS revenue DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS net_income DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS book_value DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS shareholder_equity DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS total_debt DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS free_cash_flow DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS shares_outstanding DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS market_cap DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS pe_ratio DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS pb_ratio DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS return_on_equity DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS revenue_growth DOUBLE PRECISION;
+ALTER TABLE qd_fundamental_snapshots ADD COLUMN IF NOT EXISTS debt_to_equity DOUBLE PRECISION;
 
 CREATE INDEX IF NOT EXISTS idx_fundamental_snapshots_pit
   ON qd_fundamental_snapshots (market, symbol, available_at, period_end);
@@ -897,6 +940,9 @@ CREATE TABLE IF NOT EXISTS qd_portfolio_rebalance_orders (
     status VARCHAR(32) NOT NULL DEFAULT 'planned',
     order_intent_id INTEGER NOT NULL DEFAULT 0,
     pending_order_id BIGINT NOT NULL DEFAULT 0,
+    actual_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
+    actual_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+    acknowledged_at TIMESTAMP NULL,
     error_code VARCHAR(120) NOT NULL DEFAULT '',
     payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -907,54 +953,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_portfolio_rebalance_order_key
   ON qd_portfolio_rebalance_orders(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_portfolio_rebalance_orders_plan
   ON qd_portfolio_rebalance_orders(plan_id, status);
-
-ALTER TABLE qd_portfolio_rebalance_orders
-  ADD COLUMN IF NOT EXISTS pending_order_id BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE qd_portfolio_rebalance_orders
-  ADD COLUMN IF NOT EXISTS actual_quantity DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE qd_portfolio_rebalance_orders
-  ADD COLUMN IF NOT EXISTS actual_price DOUBLE PRECISION NOT NULL DEFAULT 0;
-ALTER TABLE qd_portfolio_rebalance_orders
-  ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP NULL;
-
-CREATE TABLE IF NOT EXISTS qd_portfolio_deployments (
-    id BIGSERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
-    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
-    source_id INTEGER NOT NULL REFERENCES qd_script_sources(id) ON DELETE RESTRICT,
-    universe_id BIGINT NOT NULL REFERENCES qd_universes(id) ON DELETE RESTRICT,
-    name VARCHAR(255) NOT NULL,
-    execution_mode VARCHAR(20) NOT NULL DEFAULT 'notify_only',
-    credential_id INTEGER NOT NULL DEFAULT 0,
-    rebalance_frequency VARCHAR(16) NOT NULL DEFAULT 'weekly',
-    status VARCHAR(20) NOT NULL DEFAULT 'stopped',
-    config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    last_run_at TIMESTAMP NULL,
-    next_run_at TIMESTAMP NULL,
-    last_error VARCHAR(500) NOT NULL DEFAULT '',
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    CONSTRAINT ck_portfolio_deployment_mode CHECK (execution_mode IN ('live', 'notify_only')),
-    CONSTRAINT ck_portfolio_deployment_frequency CHECK (rebalance_frequency IN ('daily', 'weekly', 'monthly')),
-    CONSTRAINT ck_portfolio_deployment_status CHECK (status IN ('stopped', 'running', 'error'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_portfolio_deployments_due
-  ON qd_portfolio_deployments(status, next_run_at);
-CREATE INDEX IF NOT EXISTS idx_portfolio_deployments_user
-  ON qd_portfolio_deployments(user_id, updated_at DESC);
-
-ALTER TABLE qd_portfolio_deployments
-  ADD COLUMN IF NOT EXISTS cash_balance DOUBLE PRECISION;
-
-CREATE TABLE IF NOT EXISTS qd_portfolio_deployment_positions (
-    deployment_id BIGINT NOT NULL REFERENCES qd_portfolio_deployments(id) ON DELETE CASCADE,
-    symbol VARCHAR(80) NOT NULL,
-    quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
-    average_price DOUBLE PRECISION NOT NULL DEFAULT 0,
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (deployment_id, symbol)
-);
 
 INSERT INTO qd_universes
   (code, name_i18n_key, market, universe_type, source, source_ref, is_system, status)
@@ -1048,15 +1046,11 @@ CREATE TABLE IF NOT EXISTS qd_backtest_runs (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL DEFAULT 1 REFERENCES qd_users(id) ON DELETE CASCADE,
     strategy_id INTEGER,
+    source_id INTEGER NOT NULL,
     strategy_name VARCHAR(255) DEFAULT '',
-    asset_type VARCHAR(50) DEFAULT '',
-    asset_id INTEGER,
-    run_type VARCHAR(50) DEFAULT 'indicator',
     market VARCHAR(50) NOT NULL DEFAULT '',
     symbol VARCHAR(50) NOT NULL DEFAULT '',
-    exchange_id VARCHAR(50) NOT NULL DEFAULT '',
     market_type VARCHAR(20) NOT NULL DEFAULT 'spot',
-    instrument_id VARCHAR(120) NOT NULL DEFAULT '',
     timeframe VARCHAR(10) NOT NULL DEFAULT '',
     start_date VARCHAR(20) NOT NULL DEFAULT '',
     end_date VARCHAR(20) NOT NULL DEFAULT '',
@@ -1064,9 +1058,8 @@ CREATE TABLE IF NOT EXISTS qd_backtest_runs (
     commission DECIMAL(10,6) DEFAULT 0.001,
     slippage DECIMAL(10,6) DEFAULT 0,
     leverage INTEGER DEFAULT 1,
-    trade_direction VARCHAR(20) DEFAULT 'long',
-    strategy_config TEXT DEFAULT '',
-    config_snapshot TEXT DEFAULT '',
+    params_json TEXT NOT NULL DEFAULT '{}',
+    manifest_json TEXT NOT NULL DEFAULT '{}',
     engine_version VARCHAR(50) DEFAULT '',
     code_hash VARCHAR(128) DEFAULT '',
     status VARCHAR(20) DEFAULT 'success',
@@ -1077,10 +1070,7 @@ CREATE TABLE IF NOT EXISTS qd_backtest_runs (
 
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_user_id ON qd_backtest_runs(user_id);
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy_id ON qd_backtest_runs(strategy_id);
-CREATE INDEX IF NOT EXISTS idx_backtest_runs_run_type ON qd_backtest_runs(run_type);
-ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS exchange_id VARCHAR(50) NOT NULL DEFAULT '';
-ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) NOT NULL DEFAULT 'spot';
-ALTER TABLE qd_backtest_runs ADD COLUMN IF NOT EXISTS instrument_id VARCHAR(120) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_source_id ON qd_backtest_runs(source_id);
 
 CREATE TABLE IF NOT EXISTS qd_backtest_trades (
     id SERIAL PRIMARY KEY,
@@ -1112,6 +1102,35 @@ CREATE TABLE IF NOT EXISTS qd_backtest_equity_points (
 );
 
 CREATE INDEX IF NOT EXISTS idx_backtest_equity_points_run_id ON qd_backtest_equity_points(run_id);
+
+CREATE TABLE IF NOT EXISTS qd_factor_research_runs (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL DEFAULT 1 REFERENCES qd_users(id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL,
+    source_name VARCHAR(255) DEFAULT '',
+    market VARCHAR(100) DEFAULT '',
+    timeframe VARCHAR(10) DEFAULT '',
+    start_date VARCHAR(20) NOT NULL DEFAULT '',
+    end_date VARCHAR(20) NOT NULL DEFAULT '',
+    factor_id VARCHAR(64) NOT NULL DEFAULT '',
+    groups_count INTEGER NOT NULL DEFAULT 5,
+    holding_period INTEGER NOT NULL DEFAULT 5,
+    commission DECIMAL(10,6) DEFAULT 0.001,
+    slippage DECIMAL(10,6) DEFAULT 0,
+    neutralize_industry BOOLEAN NOT NULL DEFAULT FALSE,
+    universe_size INTEGER NOT NULL DEFAULT 0,
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    code_hash VARCHAR(128) DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    status VARCHAR(20) DEFAULT 'success',
+    error_message TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_factor_research_runs_user_id
+  ON qd_factor_research_runs(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_factor_research_runs_source_id
+  ON qd_factor_research_runs(source_id, id DESC);
 
 -- =============================================================================
 -- 13. Exchange Credentials
@@ -1572,35 +1591,7 @@ BEGIN
 END $$;
 
 -- =============================================================================
--- 20d. Migration: strategy trade close reason & grid matched PnL (old DBs)
--- =============================================================================
-
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS close_reason VARCHAR(64) DEFAULT '';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS matched_entry_price DECIMAL(20,8) DEFAULT 0;
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS grid_matched_profit DECIMAL(20,8) DEFAULT 0;
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) DEFAULT 'swap';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0;
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT '';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS symbol_canonical VARCHAR(50) DEFAULT '';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS fill_source VARCHAR(32) DEFAULT '';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS pending_order_id INTEGER DEFAULT 0;
-ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) DEFAULT 'swap';
-ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0;
-ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT '';
-ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS symbol_canonical VARCHAR(50) DEFAULT '';
-ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0;
-ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT '';
-ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0;
-ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS order_intent_id INTEGER DEFAULT 0;
-ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(180) DEFAULT '';
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0;
-ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS order_intent_id INTEGER DEFAULT 0;
-ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0;
-CREATE INDEX IF NOT EXISTS idx_trades_strategy_symbol_canon ON qd_strategy_trades (strategy_id, market_type, symbol_canonical);
-CREATE INDEX IF NOT EXISTS idx_positions_strategy_leg ON qd_strategy_positions (strategy_id, market_type, symbol_canonical, side);
-
--- =============================================================================
--- 20e. Stateful ScriptStrategy runtime / basket / order intent infrastructure
+-- 20e. Stateful Strategy API runtime and order intent infrastructure
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS strategy_runs (
@@ -1637,65 +1628,10 @@ CREATE TABLE IF NOT EXISTS strategy_runtime_state (
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_runtime_state_strategy ON strategy_runtime_state(strategy_id);
 
-CREATE TABLE IF NOT EXISTS strategy_baskets (
-    id SERIAL PRIMARY KEY,
-    basket_id VARCHAR(96) NOT NULL,
-    strategy_run_id INTEGER NOT NULL DEFAULT 0,
-    strategy_id INTEGER NOT NULL,
-    symbol VARCHAR(80) NOT NULL DEFAULT '',
-    side VARCHAR(10) NOT NULL,
-    status VARCHAR(24) NOT NULL DEFAULT 'idle',
-    current_layer INTEGER NOT NULL DEFAULT 0,
-    current_order_in_layer INTEGER NOT NULL DEFAULT 0,
-    total_qty DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    total_notional DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    avg_entry_price DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    next_entry_trigger DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    take_profit_price DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    max_layer INTEGER NOT NULL DEFAULT 0,
-    max_orders_per_layer INTEGER NOT NULL DEFAULT 0,
-    risk_state_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE(strategy_run_id, strategy_id, basket_id)
-);
-CREATE INDEX IF NOT EXISTS idx_strategy_baskets_strategy ON strategy_baskets(strategy_id, status);
-
-CREATE TABLE IF NOT EXISTS strategy_basket_orders (
-    id SERIAL PRIMARY KEY,
-    basket_order_id VARCHAR(128) NOT NULL DEFAULT '',
-    basket_id VARCHAR(96) NOT NULL,
-    strategy_run_id INTEGER NOT NULL DEFAULT 0,
-    strategy_id INTEGER NOT NULL,
-    symbol VARCHAR(80) NOT NULL DEFAULT '',
-    side VARCHAR(10) NOT NULL,
-    layer_index INTEGER NOT NULL DEFAULT 0,
-    order_index INTEGER NOT NULL DEFAULT 0,
-    action VARCHAR(24) NOT NULL DEFAULT 'open',
-    planned_price DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    planned_qty DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    planned_notional DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    status VARCHAR(32) NOT NULL DEFAULT 'planned',
-    order_intent_id INTEGER NOT NULL DEFAULT 0,
-    exchange_order_id VARCHAR(100) NOT NULL DEFAULT '',
-    client_order_id VARCHAR(100) NOT NULL DEFAULT '',
-    filled_qty DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    avg_fill_price DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    fee DECIMAL(28, 12) NOT NULL DEFAULT 0,
-    error TEXT NOT NULL DEFAULT '',
-    extra_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    UNIQUE(strategy_run_id, basket_id, side, layer_index, order_index, action)
-);
-CREATE INDEX IF NOT EXISTS idx_strategy_basket_orders_basket ON strategy_basket_orders(strategy_run_id, basket_id, status);
-
 CREATE TABLE IF NOT EXISTS strategy_order_intents (
     id SERIAL PRIMARY KEY,
     strategy_run_id INTEGER NOT NULL DEFAULT 0,
     strategy_id INTEGER NOT NULL,
-    basket_id VARCHAR(96) NOT NULL DEFAULT '',
-    basket_order_id INTEGER NOT NULL DEFAULT 0,
     idempotency_key VARCHAR(180) NOT NULL,
     symbol VARCHAR(80) NOT NULL,
     market_type VARCHAR(20) NOT NULL DEFAULT 'swap',
@@ -1707,6 +1643,12 @@ CREATE TABLE IF NOT EXISTS strategy_order_intents (
     notional DECIMAL(28, 12) NOT NULL DEFAULT 0,
     limit_price DECIMAL(28, 12) NOT NULL DEFAULT 0,
     execution_algo VARCHAR(32) NOT NULL DEFAULT 'market',
+    portfolio_id VARCHAR(96) NOT NULL DEFAULT '',
+    universe_id VARCHAR(96) NOT NULL DEFAULT '',
+    rebalance_group_id VARCHAR(128) NOT NULL DEFAULT '',
+    target_weight DECIMAL(18, 10),
+    target_notional DECIMAL(28, 12),
+    target_position_qty DECIMAL(28, 12),
     status VARCHAR(32) NOT NULL DEFAULT 'intent_created',
     client_order_id VARCHAR(100) NOT NULL DEFAULT '',
     exchange_order_id VARCHAR(100) NOT NULL DEFAULT '',
@@ -1716,14 +1658,12 @@ CREATE TABLE IF NOT EXISTS strategy_order_intents (
     UNIQUE(strategy_run_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_order_intents_strategy ON strategy_order_intents(strategy_id, status);
-CREATE INDEX IF NOT EXISTS idx_strategy_order_intents_basket ON strategy_order_intents(strategy_run_id, basket_id);
 
 CREATE TABLE IF NOT EXISTS strategy_order_fills (
     id SERIAL PRIMARY KEY,
     order_intent_id INTEGER NOT NULL DEFAULT 0,
     strategy_run_id INTEGER NOT NULL DEFAULT 0,
     strategy_id INTEGER NOT NULL DEFAULT 0,
-    basket_id VARCHAR(96) NOT NULL DEFAULT '',
     exchange_id VARCHAR(50) NOT NULL DEFAULT '',
     exchange_order_id VARCHAR(100) NOT NULL DEFAULT '',
     exchange_fill_id VARCHAR(128) NOT NULL DEFAULT '',
@@ -1875,17 +1815,6 @@ CREATE TABLE IF NOT EXISTS qd_indicator_purchases (
     UNIQUE(indicator_id, buyer_id)
 );
 
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS gross_price DECIMAL(10,2);
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10,2) DEFAULT 0;
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS seller_amount DECIMAL(10,2);
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS fee_rate DECIMAL(10,6) DEFAULT 0;
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_name_snapshot VARCHAR(255);
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_description_snapshot TEXT;
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_code_snapshot TEXT;
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_type_snapshot VARCHAR(32);
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_preview_image_snapshot VARCHAR(500);
-ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_is_encrypted_snapshot INTEGER DEFAULT 0;
-
 CREATE INDEX IF NOT EXISTS idx_purchases_indicator ON qd_indicator_purchases(indicator_id);
 CREATE INDEX IF NOT EXISTS idx_purchases_buyer ON qd_indicator_purchases(buyer_id);
 CREATE INDEX IF NOT EXISTS idx_purchases_seller ON qd_indicator_purchases(seller_id);
@@ -1905,42 +1834,6 @@ CREATE TABLE IF NOT EXISTS qd_indicator_comments (
 
 CREATE INDEX IF NOT EXISTS idx_comments_indicator ON qd_indicator_comments(indicator_id);
 CREATE INDEX IF NOT EXISTS idx_comments_user ON qd_indicator_comments(user_id);
-
--- Add community stats columns to qd_indicator_codes
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'qd_indicator_codes' AND column_name = 'purchase_count'
-    ) THEN
-        ALTER TABLE qd_indicator_codes ADD COLUMN purchase_count INTEGER DEFAULT 0;
-        RAISE NOTICE 'Added purchase_count column to qd_indicator_codes';
-    END IF;
-    
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'qd_indicator_codes' AND column_name = 'avg_rating'
-    ) THEN
-        ALTER TABLE qd_indicator_codes ADD COLUMN avg_rating DECIMAL(3,2) DEFAULT 0;
-        RAISE NOTICE 'Added avg_rating column to qd_indicator_codes';
-    END IF;
-    
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'qd_indicator_codes' AND column_name = 'rating_count'
-    ) THEN
-        ALTER TABLE qd_indicator_codes ADD COLUMN rating_count INTEGER DEFAULT 0;
-        RAISE NOTICE 'Added rating_count column to qd_indicator_codes';
-    END IF;
-    
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns 
-        WHERE table_name = 'qd_indicator_codes' AND column_name = 'view_count'
-    ) THEN
-        ALTER TABLE qd_indicator_codes ADD COLUMN view_count INTEGER DEFAULT 0;
-        RAISE NOTICE 'Added view_count column to qd_indicator_codes';
-    END IF;
-END $$;
 
 -- =============================================================================
 -- Quick Trades (manual / discretionary orders from Quick Trade Panel)
@@ -1965,6 +1858,7 @@ CREATE TABLE IF NOT EXISTS qd_quick_trades (
     avg_fill_price  DECIMAL(24, 8) DEFAULT 0,
     commission      DECIMAL(24, 8) DEFAULT 0,              -- realised trading fee for this fill (best-effort)
     commission_ccy  VARCHAR(16) DEFAULT '',                -- e.g. 'USDT' / 'BNB'; empty when unknown
+    commission_quote DECIMAL(24, 8),
     error_msg       TEXT DEFAULT '',
     source          VARCHAR(40) DEFAULT 'manual',          -- ai_radar / ai_analysis / indicator / manual
     raw_result      JSONB,
@@ -1988,6 +1882,19 @@ BEGIN
         RAISE NOTICE 'Added commission / commission_ccy columns to qd_quick_trades';
     END IF;
 END $$;
+
+ALTER TABLE qd_strategy_trades ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(24,8);
+ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission DECIMAL(24,8) DEFAULT 0;
+ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission_ccy VARCHAR(16) DEFAULT '';
+ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS commission_quote DECIMAL(24,8);
+UPDATE qd_strategy_trades
+SET commission_quote = commission
+WHERE commission_quote IS NULL
+  AND UPPER(COALESCE(commission_ccy, '')) IN ('USD', 'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD');
+UPDATE qd_quick_trades
+SET commission_quote = commission
+WHERE commission_quote IS NULL
+  AND UPPER(COALESCE(commission_ccy, '')) IN ('USD', 'USDT', 'USDC', 'BUSD', 'FDUSD', 'TUSD');
 
 -- =============================================================================
 -- Polymarket (宸茬Щ闄?/ removed in v3.0.7)
@@ -2029,7 +1936,7 @@ CREATE TABLE IF NOT EXISTS qd_agent_jobs (
     job_id VARCHAR(40) NOT NULL UNIQUE,          -- public id (uuid4 hex)
     user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
     agent_token_id INTEGER REFERENCES qd_agent_tokens(id) ON DELETE SET NULL,
-    kind VARCHAR(40) NOT NULL,                   -- backtest / experiment_pipeline / ai_optimize / ...
+    kind VARCHAR(40) NOT NULL,                   -- backtest
     status VARCHAR(20) NOT NULL DEFAULT 'queued',-- queued/running/succeeded/failed/cancelled
     request JSONB NOT NULL DEFAULT '{}'::jsonb,
     result JSONB,
@@ -2092,2201 +1999,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_paper_orders_token ON qd_agent_paper_orders
 -- Jobs created before progress JSONB existed (Agent Gateway v3.1)
 ALTER TABLE qd_agent_jobs ADD COLUMN IF NOT EXISTS progress JSONB;
 
--- ===== Script strategy templates seed =====
-CREATE TABLE IF NOT EXISTS qd_script_templates (
-    id SERIAL PRIMARY KEY,
-    template_key VARCHAR(80) UNIQUE NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    description TEXT DEFAULT '',
-    code TEXT NOT NULL DEFAULT '',
-    param_schema JSONB DEFAULT '{}'::jsonb,
-    tags JSONB DEFAULT '[]'::jsonb,
-    icon VARCHAR(64) DEFAULT 'appstore',
-    accent VARCHAR(32) DEFAULT 'blue',
-    sort_order INTEGER DEFAULT 0,
-    is_active BOOLEAN DEFAULT TRUE,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_script_templates_active ON qd_script_templates(is_active, sort_order);
-
-DELETE FROM qd_script_templates
-WHERE template_key IN ('ema_atr_trend_risk', 'breakout_retest_guard');
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('classic_ema_atr_trend', 'Classic EMA ATR Trend', 'EMA trend-following strategy with ATR stop, trailing stop, and cooldown.', $qdtpl1$"""
-Classic EMA ATR Trend
-EMA trend-following strategy with ATR stop, trailing stop, and cooldown.
-"""
-
-# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.fast_ema = ctx.param("fast_ema", 12)
-    ctx.slow_ema = ctx.param("slow_ema", 48)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.risk_pct = ctx.param("risk_pct", 0.35)
-    ctx.stop_atr = ctx.param("stop_atr", 2.2)
-    ctx.trail_atr = ctx.param("trail_atr", 2.8)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 8)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-
-def _ema(values, period):
-    if not values:
-        return 0.0
-    k = 2.0 / (float(period) + 1.0)
-    out = float(values[0])
-    for v in values[1:]:
-        out = float(v) * k + out * (1.0 - k)
-    return out
-
-
-def _atr(bars, period):
-    if len(bars) < period + 1:
-        return 0.0
-    trs = []
-    for i in range(len(bars) - period, len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.slow_ema), int(ctx.atr_period)) + 3
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    atr = _atr(bars, int(ctx.atr_period))
-    if atr <= 0:
-        return
-    fast = _ema(closes[-int(ctx.fast_ema):], int(ctx.fast_ema))
-    slow = _ema(closes[-int(ctx.slow_ema):], int(ctx.slow_ema))
-    key = "ema_atr_" + side
-    if _has_pos(ctx, side):
-        best = float(ctx.state.get(key + "_best", price) or price)
-        stop = float(ctx.state.get(key + "_stop", 0.0) or 0.0)
-        if side == "long":
-            best = max(best, price)
-            stop = max(stop, best - atr * float(ctx.trail_atr)) if stop > 0 else price - atr * float(ctx.stop_atr)
-            hit = price <= stop
-        else:
-            best = min(best, price)
-            stop = min(stop, best + atr * float(ctx.trail_atr)) if stop > 0 else price + atr * float(ctx.stop_atr)
-            hit = price >= stop
-        ctx.state.set(key + "_best", best)
-        ctx.state.set(key + "_stop", stop)
-        if hit:
-            _close(ctx, side, "ema_atr_stop")
-            ctx.state.set(key + "_cooldown", _bar_no(ctx) + int(ctx.cooldown_bars))
-        return
-    if _bar_no(ctx) < int(ctx.state.get(key + "_cooldown", -1) or -1):
-        return
-    signal = fast > slow if side == "long" else fast < slow
-    if signal:
-        qty = _qty(ctx, ctx.risk_pct, price)
-        _open(ctx, side, qty, price, "ema_atr_entry")
-        ctx.state.set(key + "_best", price)
-        ctx.state.set(key + "_stop", price - atr * float(ctx.stop_atr) if side == "long" else price + atr * float(ctx.stop_atr))
-$qdtpl1$,
- '{"params":[{"name":"fast_ema","type":"integer","default":12,"min":2,"max":200,"step":1},{"name":"slow_ema","type":"integer","default":48,"min":5,"max":400,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"risk_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01},{"name":"stop_atr","type":"number","default":2.2,"min":0.5,"max":12,"step":0.1},{"name":"trail_atr","type":"number","default":2.8,"min":0.5,"max":12,"step":0.1},{"name":"cooldown_bars","type":"integer","default":8,"min":0,"max":300,"step":1}]}'::jsonb, '["trend", "atr"]'::jsonb, 'line-chart', 'green',
- 10, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('donchian_breakout_pyramid', 'Donchian Breakout Pyramid', 'Channel breakout strategy with pyramiding, hard stop, and exit channel.', $qdtpl2$"""
-Donchian Breakout Pyramid
-Channel breakout strategy with pyramiding, hard stop, and exit channel.
-"""
-
-# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.entry_lookback = ctx.param("entry_lookback", 55)
-    ctx.exit_lookback = ctx.param("exit_lookback", 20)
-    ctx.max_layers = ctx.param("max_layers", 4)
-    ctx.step_pct = ctx.param("step_pct", 0.012)
-    ctx.hard_stop_price_pct = ctx.param("hard_stop_price_pct", 0.06)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 8)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def _key(side, name):
-    return "donchian_" + side + "_" + name
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.entry_lookback), int(ctx.exit_lookback)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    entry_window = bars[-int(ctx.entry_lookback)-1:-1]
-    exit_window = bars[-int(ctx.exit_lookback)-1:-1]
-    high = max([float(b["high"]) for b in entry_window])
-    low = min([float(b["low"]) for b in entry_window])
-    exit_high = max([float(b["high"]) for b in exit_window])
-    exit_low = min([float(b["low"]) for b in exit_window])
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        channel_exit = price <= exit_low if side == "long" else price >= exit_high
-        if channel_exit or _pnl(side, entry, price) <= -float(ctx.hard_stop_price_pct):
-            _close(ctx, side, "donchian_exit")
-            ctx.state.set(_key(side, "layer"), 0)
-            ctx.state.set(_key(side, "cooldown"), _bar_no(ctx) + int(ctx.cooldown_bars))
-            return
-        layer = int(ctx.state.get(_key(side, "layer"), 1) or 1)
-        next_add = float(ctx.state.get(_key(side, "next_add"), 0.0) or 0.0)
-        add_hit = price >= next_add if side == "long" else price <= next_add
-        if layer < int(ctx.max_layers) and next_add > 0 and add_hit:
-            qty = _qty(ctx, 1.0 / max(1, int(ctx.max_layers)), price)
-            _add(ctx, side, qty, price, "donchian_pyramid")
-            ctx.state.set(_key(side, "layer"), layer + 1)
-            ctx.state.set(_key(side, "next_add"), price * (1.0 + float(ctx.step_pct)) if side == "long" else price * (1.0 - float(ctx.step_pct)))
-        return
-    if _bar_no(ctx) < int(ctx.state.get(_key(side, "cooldown"), -1) or -1):
-        return
-    breakout = price > high if side == "long" else price < low
-    if breakout:
-        qty = _qty(ctx, 1.0 / max(1, int(ctx.max_layers)), price)
-        _open(ctx, side, qty, price, "donchian_breakout")
-        ctx.state.set(_key(side, "layer"), 1)
-        ctx.state.set(_key(side, "next_add"), price * (1.0 + float(ctx.step_pct)) if side == "long" else price * (1.0 - float(ctx.step_pct)))
-$qdtpl2$,
- '{"params":[{"name":"entry_lookback","type":"integer","default":55,"min":10,"max":300,"step":1},{"name":"exit_lookback","type":"integer","default":20,"min":5,"max":200,"step":1},{"name":"max_layers","type":"integer","default":4,"min":1,"max":8,"step":1},{"name":"step_pct","type":"percent","default":0.012,"min":0.001,"max":0.2,"step":0.001},{"name":"hard_stop_price_pct","type":"percent","default":0.06,"min":0.005,"max":0.8,"step":0.005},{"name":"cooldown_bars","type":"integer","default":8,"min":0,"max":300,"step":1}]}'::jsonb, '["breakout", "pyramid"]'::jsonb, 'rise', 'cyan',
- 20, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('bollinger_reversion_basket', 'Bollinger Reversion Basket', 'Bollinger mean-reversion basket with controlled add layers and average-cost exit.', $qdtpl3$"""
-Bollinger Reversion Basket
-Bollinger mean-reversion basket with controlled add layers and average-cost exit.
-"""
-
-# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.period = ctx.param("period", 20)
-    ctx.std_mult = ctx.param("std_mult", 2.0)
-    ctx.max_layers = ctx.param("max_layers", 4)
-    ctx.layer_step_pct = ctx.param("layer_step_pct", 0.012)
-    ctx.layer_multiplier = ctx.param("layer_multiplier", 1.25)
-    ctx.take_profit_price_pct = ctx.param("take_profit_price_pct", 0.008)
-    ctx.hard_stop_price_pct = ctx.param("hard_stop_price_pct", 0.08)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def _mean(values):
-    return sum(values) / len(values) if values else 0.0
-
-def _std(values):
-    m = _mean(values)
-    return (sum([(v - m) * (v - m) for v in values]) / len(values)) ** 0.5 if values else 0.0
-
-def _key(side, name):
-    return "boll_" + side + "_" + name
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.period) + 2)
-    if len(bars) < int(ctx.period) + 2:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars[-int(ctx.period)-1:-1]]
-    mid = _mean(closes)
-    dev = _std(closes)
-    upper = mid + dev * float(ctx.std_mult)
-    lower = mid - dev * float(ctx.std_mult)
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        if _pnl(side, entry, price) >= float(ctx.take_profit_price_pct) or _pnl(side, entry, price) <= -float(ctx.hard_stop_price_pct):
-            _close(ctx, side, "bollinger_exit")
-            ctx.state.set(_key(side, "layer"), 0)
-            return
-        layer = int(ctx.state.get(_key(side, "layer"), 1) or 1)
-        anchor = float(ctx.state.get(_key(side, "anchor"), price) or price)
-        trigger = anchor * (1.0 - float(ctx.layer_step_pct) * layer) if side == "long" else anchor * (1.0 + float(ctx.layer_step_pct) * layer)
-        add_hit = price <= trigger if side == "long" else price >= trigger
-        if layer < int(ctx.max_layers) and add_hit:
-            pct = (1.0 / max(1, int(ctx.max_layers))) * (float(ctx.layer_multiplier) ** max(0, layer))
-            _add(ctx, side, _qty(ctx, pct, price), price, "bollinger_add")
-            ctx.state.set(_key(side, "layer"), layer + 1)
-        return
-    entry_signal = price <= lower if side == "long" else price >= upper
-    if entry_signal:
-        _open(ctx, side, _qty(ctx, 1.0 / max(1, int(ctx.max_layers)), price), price, "bollinger_entry")
-        ctx.state.set(_key(side, "layer"), 1)
-        ctx.state.set(_key(side, "anchor"), price)
-$qdtpl3$,
- '{"params":[{"name":"period","type":"integer","default":20,"min":5,"max":240,"step":1},{"name":"std_mult","type":"number","default":2,"min":0.5,"max":5,"step":0.1},{"name":"max_layers","type":"integer","default":4,"min":1,"max":10,"step":1},{"name":"layer_step_pct","type":"percent","default":0.012,"min":0.001,"max":0.3,"step":0.001},{"name":"layer_multiplier","type":"number","default":1.25,"min":1,"max":5,"step":0.05},{"name":"take_profit_price_pct","type":"percent","default":0.008,"min":0.0005,"max":0.2,"step":0.0005},{"name":"hard_stop_price_pct","type":"percent","default":0.08,"min":0.005,"max":0.8,"step":0.005}]}'::jsonb, '["reversion", "bollinger"]'::jsonb, 'stock', 'teal',
- 30, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('range_grid_basket', 'Range Grid Basket', 'Bar-close range grid simulation using recent high/low as adaptive boundaries. It does not pre-place exchange resting limit orders; use the Grid Bot engine for live long/short/neutral grids.', $qdtpl4$"""
-Range Grid Basket
-Bar-close range grid simulation using recent high/low as adaptive boundaries.
-
-This script is a lightweight strategy-code example. It reacts on completed bars
-and sends open/add/close intents. It is NOT the exchange-style Grid Bot that
-pre-places resting limit orders on every grid line. For live long/short/neutral
-grid trading with pre-hung orders, use the Grid Bot template strategy.
-"""
-
-# timeframe: 15m
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.lookback = ctx.param("lookback", 120)
-    ctx.grid_levels = ctx.param("grid_levels", 8)
-    ctx.order_pct = ctx.param("order_pct", 0.08)
-    ctx.take_profit_price_pct = ctx.param("take_profit_price_pct", 0.006)
-    ctx.range_buffer_pct = ctx.param("range_buffer_pct", 0.01)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.lookback) + 2)
-    if len(bars) < int(ctx.lookback) + 2:
-        return
-    price = float(bar["close"])
-    top = max([float(b["high"]) for b in bars[-int(ctx.lookback)-1:-1]])
-    bottom = min([float(b["low"]) for b in bars[-int(ctx.lookback)-1:-1]])
-    width = top - bottom
-    if width <= 0:
-        return
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        out_range = price < bottom * (1.0 - float(ctx.range_buffer_pct)) or price > top * (1.0 + float(ctx.range_buffer_pct))
-        if _pnl(side, entry, price) >= float(ctx.take_profit_price_pct) or out_range:
-            _close(ctx, side, "grid_exit")
-        return
-    level = int((price - bottom) / (width / max(2, int(ctx.grid_levels))))
-    low_zone = level <= int(ctx.grid_levels) // 3
-    high_zone = level >= int(ctx.grid_levels) * 2 // 3
-    if (side == "long" and low_zone) or (side == "short" and high_zone):
-        _open(ctx, side, _qty(ctx, ctx.order_pct, price), price, "grid_entry")
-$qdtpl4$,
- '{"params":[{"name":"lookback","type":"integer","default":120,"min":20,"max":500,"step":1},{"name":"grid_levels","type":"integer","default":8,"min":3,"max":40,"step":1},{"name":"order_pct","type":"percent","default":0.08,"min":0.01,"max":0.5,"step":0.01},{"name":"take_profit_price_pct","type":"percent","default":0.006,"min":0.0005,"max":0.1,"step":0.0005},{"name":"range_buffer_pct","type":"percent","default":0.01,"min":0,"max":0.2,"step":0.001}]}'::jsonb, '["grid", "range"]'::jsonb, 'table', 'gold',
- 40, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('dca_accumulator', 'DCA Accumulator', 'Periodic DCA accumulator with dip multiplier and portfolio-level exit controls.', $qdtpl5$"""
-DCA Accumulator
-Periodic DCA accumulator with dip multiplier and portfolio-level exit controls.
-"""
-
-# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.interval_bars = ctx.param("interval_bars", 24)
-    ctx.order_pct = ctx.param("order_pct", 0.08)
-    ctx.dip_pct = ctx.param("dip_pct", 0.05)
-    ctx.dip_multiplier = ctx.param("dip_multiplier", 2.0)
-    ctx.max_orders = ctx.param("max_orders", 20)
-    ctx.take_profit_price_pct = ctx.param("take_profit_price_pct", 0.25)
-    ctx.hard_stop_price_pct = ctx.param("hard_stop_price_pct", 0.35)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def on_bar(ctx, bar):
-    side = "long"
-    price = float(bar["close"])
-    orders = int(ctx.state.get("dca_orders", 0) or 0)
-    last_buy = float(ctx.state.get("dca_last_buy", 0.0) or 0.0)
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        if _pnl(side, entry, price) >= float(ctx.take_profit_price_pct) or _pnl(side, entry, price) <= -float(ctx.hard_stop_price_pct):
-            _close(ctx, side, "dca_exit")
-            ctx.state.set("dca_orders", 0)
-            ctx.state.set("dca_last_buy", 0.0)
-            return
-    if orders >= int(ctx.max_orders):
-        return
-    periodic = int(ctx.interval_bars) > 0 and _bar_no(ctx) % int(ctx.interval_bars) == 0
-    dip = last_buy > 0 and price <= last_buy * (1.0 - float(ctx.dip_pct))
-    if periodic or dip:
-        pct = float(ctx.order_pct) * (float(ctx.dip_multiplier) if dip else 1.0)
-        if _has_pos(ctx, side):
-            _add(ctx, side, _qty(ctx, pct, price), price, "dca_add")
-        else:
-            _open(ctx, side, _qty(ctx, pct, price), price, "dca_open")
-        ctx.state.set("dca_orders", orders + 1)
-        ctx.state.set("dca_last_buy", price)
-$qdtpl5$,
- '{"params":[{"name":"interval_bars","type":"integer","default":24,"min":1,"max":2000,"step":1},{"name":"order_pct","type":"percent","default":0.08,"min":0.01,"max":0.5,"step":0.01},{"name":"dip_pct","type":"percent","default":0.05,"min":0.001,"max":0.5,"step":0.001},{"name":"dip_multiplier","type":"number","default":2,"min":1,"max":10,"step":0.1},{"name":"max_orders","type":"integer","default":20,"min":1,"max":200,"step":1},{"name":"take_profit_price_pct","type":"percent","default":0.25,"min":0.01,"max":3,"step":0.01},{"name":"hard_stop_price_pct","type":"percent","default":0.35,"min":0.01,"max":0.9,"step":0.01}]}'::jsonb, '["dca"]'::jsonb, 'dollar', 'blue',
- 50, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('sequential_martingale', 'Sequential Martingale', 'Budget-capped sequential martingale with explicit total budget, first-order sizing, adverse-price adds, average-cost take-profit, and hard stop.', $qdtpl6$"""
-Sequential Martingale
-Budget-capped sequential martingale with explicit total budget, first-order
-sizing, adverse-price adds, average-cost take-profit, and hard stop.
-
-Sizing rules:
-- total_budget_usdt > 0 overrides the panel investment amount.
-- otherwise total_budget_pct controls how much of the panel investment amount
-  this martingale sequence may consume.
-- initial_order_usdt > 0 overrides first_order_pct.
-- otherwise first_order_pct controls the first order as a share of total budget.
-- add orders follow first_order * multiplier^n but are clipped by remaining
-  sequence budget, so the whole sequence cannot exceed total budget.
-"""
-
-# timeframe: 5m
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.max_orders = ctx.param("max_orders", 8)
-    ctx.total_budget_usdt = ctx.param("total_budget_usdt", 0.0)
-    ctx.total_budget_pct = ctx.param("total_budget_pct", 1.0)
-    ctx.initial_order_usdt = ctx.param("initial_order_usdt", 0.0)
-    ctx.first_order_pct = ctx.param("first_order_pct", 0.05)
-    ctx.multiplier = ctx.param("multiplier", 1.7)
-    ctx.spacing_pct = ctx.param("spacing_pct", 0.008)
-    ctx.take_profit_price_pct = ctx.param("take_profit_price_pct", 0.006)
-    ctx.hard_stop_price_pct = ctx.param("hard_stop_price_pct", 0.22)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        explicit = float(ctx.total_budget_usdt or 0.0)
-    except Exception:
-        explicit = 0.0
-    if explicit > 0:
-        return explicit
-    try:
-        base = float(ctx.investment_amount or 0.0)
-    except Exception:
-        base = 0.0
-    if base <= 0:
-        try:
-            base = float(ctx.equity or 0.0)
-        except Exception:
-            base = 0.0
-    try:
-        pct = max(0.0, min(1.0, float(ctx.total_budget_pct)))
-    except Exception:
-        pct = 1.0
-    return max(base * pct, 0.0)
-
-def _first_quote(ctx):
-    budget = _budget(ctx)
-    if budget <= 0:
-        return 0.0
-    try:
-        explicit = float(ctx.initial_order_usdt or 0.0)
-    except Exception:
-        explicit = 0.0
-    if explicit > 0:
-        return min(explicit, budget)
-    try:
-        pct = max(0.0, min(1.0, float(ctx.first_order_pct)))
-    except Exception:
-        pct = 0.05
-    return min(max(budget * pct, 10.0), budget)
-
-def _planned_quote(ctx, order_index):
-    first = _first_quote(ctx)
-    if first <= 0:
-        return 0.0
-    try:
-        mult = max(1.0, float(ctx.multiplier))
-    except Exception:
-        mult = 1.0
-    return first * (mult ** max(0, int(order_index)))
-
-def _quote_to_qty(ctx, quote, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(float(quote or 0.0), 0.0) * lev / price
-
-def _budget_left(ctx, spent):
-    return max(_budget(ctx) - max(0.0, float(spent or 0.0)), 0.0)
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def _next(side, price, pct):
-    return price * (1.0 - pct) if side == "long" else price * (1.0 + pct)
-
-def _hit(side, price, trigger):
-    return price <= trigger if side == "long" else price >= trigger
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    price = float(bar["close"])
-    count_key = "mart_count_" + side
-    next_key = "mart_next_" + side
-    spent_key = "mart_spent_" + side
-    count = int(ctx.state.get(count_key, 0) or 0)
-    spent = float(ctx.state.get(spent_key, 0.0) or 0.0)
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        if _pnl(side, entry, price) >= float(ctx.take_profit_price_pct) or _pnl(side, entry, price) <= -float(ctx.hard_stop_price_pct):
-            _close(ctx, side, "martingale_exit")
-            ctx.state.set(count_key, 0)
-            ctx.state.set(spent_key, 0.0)
-            return
-        trigger = float(ctx.state.get(next_key, 0.0) or 0.0)
-        if count < int(ctx.max_orders) and trigger > 0 and _hit(side, price, trigger):
-            quote = min(_planned_quote(ctx, count), _budget_left(ctx, spent))
-            if quote >= 10.0:
-                _add(ctx, side, _quote_to_qty(ctx, quote, price), price, "martingale_add")
-                ctx.state.set(count_key, count + 1)
-                ctx.state.set(spent_key, spent + quote)
-                ctx.state.set(next_key, _next(side, price, float(ctx.spacing_pct)))
-        return
-    quote = _first_quote(ctx)
-    if quote < 10.0:
-        return
-    _open(ctx, side, _quote_to_qty(ctx, quote, price), price, "martingale_open")
-    ctx.state.set(count_key, 1)
-    ctx.state.set(spent_key, quote)
-    ctx.state.set(next_key, _next(side, price, float(ctx.spacing_pct)))
-$qdtpl6$,
- '{"params":[{"name":"max_orders","type":"integer","default":8,"min":1,"max":30,"step":1},{"name":"total_budget_usdt","type":"number","default":0,"min":0,"max":100000000,"step":10},{"name":"total_budget_pct","type":"percent","default":1,"min":0.01,"max":1,"step":0.01},{"name":"initial_order_usdt","type":"number","default":0,"min":0,"max":100000000,"step":10},{"name":"first_order_pct","type":"percent","default":0.05,"min":0.001,"max":1,"step":0.001},{"name":"multiplier","type":"number","default":1.7,"min":1,"max":5,"step":0.05},{"name":"spacing_pct","type":"percent","default":0.008,"min":0.0005,"max":0.5,"step":0.0005},{"name":"take_profit_price_pct","type":"percent","default":0.006,"min":0.0005,"max":0.5,"step":0.0005},{"name":"hard_stop_price_pct","type":"percent","default":0.22,"min":0.01,"max":0.9,"step":0.01}]}'::jsonb, '["martingale"]'::jsonb, 'branches', 'red',
- 60, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('layered_martingale_basket', 'Layered Martingale Basket', 'Split-position martingale with several child entries inside each layer.', $qdtpl7$"""
-Layered Martingale Basket
-Split-position martingale with several child entries inside each layer.
-"""
-
-# timeframe: 5m
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.max_layers = ctx.param("max_layers", 4)
-    ctx.splits_per_layer = ctx.param("splits_per_layer", 4)
-    ctx.layer_multiplier = ctx.param("layer_multiplier", 1.6)
-    ctx.split_spacing_pct = ctx.param("split_spacing_pct", 0.004)
-    ctx.layer_spacing_pct = ctx.param("layer_spacing_pct", 0.018)
-    ctx.take_profit_price_pct = ctx.param("take_profit_price_pct", 0.007)
-    ctx.hard_stop_price_pct = ctx.param("hard_stop_price_pct", 0.24)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-def _key(side, name):
-    return "layer_mart_" + side + "_" + name
-
-def _trigger(side, price, pct):
-    return price * (1.0 - pct) if side == "long" else price * (1.0 + pct)
-
-def _hit(side, price, trigger):
-    return price <= trigger if side == "long" else price >= trigger
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    price = float(bar["close"])
-    layer = int(ctx.state.get(_key(side, "layer"), 0) or 0)
-    split = int(ctx.state.get(_key(side, "split"), 0) or 0)
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        if _pnl(side, entry, price) >= float(ctx.take_profit_price_pct) or _pnl(side, entry, price) <= -float(ctx.hard_stop_price_pct):
-            _close(ctx, side, "layered_martingale_exit")
-            ctx.state.set(_key(side, "layer"), 0)
-            return
-        trigger = float(ctx.state.get(_key(side, "next"), 0.0) or 0.0)
-        if trigger <= 0 or not _hit(side, price, trigger):
-            return
-        next_split = split + 1
-        next_layer = layer
-        if next_split > int(ctx.splits_per_layer):
-            next_split = 1
-            next_layer = layer + 1
-        if next_layer > int(ctx.max_layers):
-            return
-        pct = (1.0 / max(1, int(ctx.max_layers) * int(ctx.splits_per_layer))) * (float(ctx.layer_multiplier) ** max(0, next_layer - 1))
-        _add(ctx, side, _qty(ctx, pct, price), price, "layered_martingale_add")
-        spacing = float(ctx.split_spacing_pct) if next_split < int(ctx.splits_per_layer) else float(ctx.layer_spacing_pct)
-        ctx.state.set(_key(side, "layer"), next_layer)
-        ctx.state.set(_key(side, "split"), next_split)
-        ctx.state.set(_key(side, "next"), _trigger(side, price, spacing))
-        return
-    pct = 1.0 / max(1, int(ctx.max_layers) * int(ctx.splits_per_layer))
-    _open(ctx, side, _qty(ctx, pct, price), price, "layered_martingale_open")
-    ctx.state.set(_key(side, "layer"), 1)
-    ctx.state.set(_key(side, "split"), 1)
-    ctx.state.set(_key(side, "next"), _trigger(side, price, float(ctx.split_spacing_pct)))
-$qdtpl7$,
- '{"params":[{"name":"max_layers","type":"integer","default":4,"min":1,"max":10,"step":1},{"name":"splits_per_layer","type":"integer","default":4,"min":1,"max":10,"step":1},{"name":"layer_multiplier","type":"number","default":1.6,"min":1,"max":5,"step":0.05},{"name":"split_spacing_pct","type":"percent","default":0.004,"min":0.0005,"max":0.2,"step":0.0005},{"name":"layer_spacing_pct","type":"percent","default":0.018,"min":0.0005,"max":0.5,"step":0.0005},{"name":"take_profit_price_pct","type":"percent","default":0.007,"min":0.0005,"max":0.5,"step":0.0005},{"name":"hard_stop_price_pct","type":"percent","default":0.24,"min":0.01,"max":0.9,"step":0.01}]}'::jsonb, '["martingale", "split"]'::jsonb, 'branches', 'purple',
- 70, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('keltner_retest_breakout', 'Keltner Retest Breakout', 'Keltner channel breakout that waits for retest confirmation and exits with ATR trail.', $qdtpl8$"""
-Keltner Retest Breakout
-Keltner channel breakout that waits for retest confirmation and exits with ATR trail.
-"""
-
-# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: indicator
-
-def on_init(ctx):
-    ctx.ema_period = ctx.param("ema_period", 40)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.channel_mult = ctx.param("channel_mult", 2.0)
-    ctx.retest_buffer_pct = ctx.param("retest_buffer_pct", 0.004)
-    ctx.risk_pct = ctx.param("risk_pct", 0.30)
-    ctx.trail_atr = ctx.param("trail_atr", 2.5)
-
-def _side(ctx):
-    d = str(ctx.direction or "long").lower()
-    return "short" if d == "short" else "long"
-
-def _budget(ctx):
-    try:
-        v = float(ctx.investment_amount or 0.0)
-    except Exception:
-        v = 0.0
-    if v > 0:
-        return v
-    try:
-        return float(ctx.equity or 0.0)
-    except Exception:
-        return 0.0
-
-def _qty(ctx, pct, price):
-    if price <= 0:
-        return 0.0
-    lev = 1.0
-    if str(ctx.market_type or "swap").lower() != "spot":
-        try:
-            lev = max(1.0, float(ctx.leverage or 1.0))
-        except Exception:
-            lev = 1.0
-    return max(_budget(ctx) * float(pct), 10.0) * lev / price
-
-def _bar_no(ctx):
-    try:
-        return int(ctx.current_index)
-    except Exception:
-        return 0
-
-def _has_pos(ctx, side):
-    if not ctx.position:
-        return False
-    if side == "short":
-        return float(ctx.position.get("short_size", 0.0) or 0.0) > 0
-    return float(ctx.position.get("long_size", ctx.position.get("size", 0.0)) or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    if not ctx.position:
-        return fallback
-    if side == "short":
-        return float(ctx.position.get("short_entry", fallback) or fallback or 0.0)
-    return float(ctx.position.get("long_entry", ctx.position.get("entry_price", fallback)) or fallback or 0.0)
-
-def _pnl(side, entry, price):
-    if entry <= 0:
-        return 0.0
-    return (entry - price) / entry if side == "short" else (price - entry) / entry
-
-def _open(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.open_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.open_long(amount=qty, price=price, reason=reason)
-
-def _add(ctx, side, qty, price, reason):
-    if side == "short":
-        ctx.add_short(amount=qty, price=price, reason=reason)
-    else:
-        ctx.add_long(amount=qty, price=price, reason=reason)
-
-def _close(ctx, side, reason):
-    if side == "short":
-        ctx.close_short(reason=reason)
-    else:
-        ctx.close_long(reason=reason)
-
-
-def _ema(values, period):
-    if not values:
-        return 0.0
-    k = 2.0 / (float(period) + 1.0)
-    out = float(values[0])
-    for v in values[1:]:
-        out = float(v) * k + out * (1.0 - k)
-    return out
-
-
-def _atr(bars, period):
-    if len(bars) < period + 1:
-        return 0.0
-    trs = []
-    for i in range(len(bars) - period, len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.ema_period), int(ctx.atr_period)) + 3
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    ema = _ema(closes[-int(ctx.ema_period):], int(ctx.ema_period))
-    atr = _atr(bars, int(ctx.atr_period))
-    if atr <= 0:
-        return
-    upper = ema + atr * float(ctx.channel_mult)
-    lower = ema - atr * float(ctx.channel_mult)
-    key = "keltner_" + side
-    if _has_pos(ctx, side):
-        stop = float(ctx.state.get(key + "_stop", 0.0) or 0.0)
-        if side == "long":
-            stop = max(stop, price - atr * float(ctx.trail_atr)) if stop > 0 else price - atr * float(ctx.trail_atr)
-            hit = price <= stop
-        else:
-            stop = min(stop, price + atr * float(ctx.trail_atr)) if stop > 0 else price + atr * float(ctx.trail_atr)
-            hit = price >= stop
-        ctx.state.set(key + "_stop", stop)
-        if hit:
-            _close(ctx, side, "keltner_trail_exit")
-        return
-    pending = float(ctx.state.get(key + "_pending", 0.0) or 0.0)
-    breakout = price > upper if side == "long" else price < lower
-    if pending <= 0 and breakout:
-        ctx.state.set(key + "_pending", upper if side == "long" else lower)
-        return
-    retest = pending > 0 and (price <= pending * (1.0 + float(ctx.retest_buffer_pct)) if side == "long" else price >= pending * (1.0 - float(ctx.retest_buffer_pct)))
-    if retest:
-        _open(ctx, side, _qty(ctx, ctx.risk_pct, price), price, "keltner_retest")
-        ctx.state.set(key + "_stop", price - atr * float(ctx.trail_atr) if side == "long" else price + atr * float(ctx.trail_atr))
-        ctx.state.set(key + "_pending", 0.0)
-$qdtpl8$,
- '{"params":[{"name":"ema_period","type":"integer","default":40,"min":5,"max":300,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"channel_mult","type":"number","default":2,"min":0.5,"max":8,"step":0.1},{"name":"retest_buffer_pct","type":"percent","default":0.004,"min":0,"max":0.1,"step":0.0005},{"name":"risk_pct","type":"percent","default":0.3,"min":0.01,"max":1,"step":0.01},{"name":"trail_atr","type":"number","default":2.5,"min":0.5,"max":12,"step":0.1}]}'::jsonb, '["keltner", "breakout"]'::jsonb, 'area-chart', 'orange',
- 80, TRUE, '{"source": "system_seed", "version": 1}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
--- ===== End script strategy templates seed =====
-
-UPDATE qd_script_templates
-SET is_active = FALSE, updated_at = NOW()
-WHERE template_key IN (
-    'classic_ema_atr_trend',
-    'donchian_breakout_pyramid',
-    'bollinger_reversion_basket',
-    'range_grid_basket',
-    'dca_accumulator',
-    'sequential_martingale',
-    'layered_martingale_basket',
-    'keltner_retest_breakout'
-);
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('ema_trend_pullback', 'EMA Trend Pullback', 'EMA trend filter with pullback entry and trend-exit discipline.', $qdtpl9$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.04
-# @strategy takeProfitPct 0.08
-
-def on_init(ctx):
-    ctx.fast = ctx.param("fast_ema", 20)
-    ctx.slow = ctx.param("slow_ema", 80)
-    ctx.pullback_pct = ctx.param("pullback_pct", 0.015)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _ema(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = values[0]
-    for value in values[1:]:
-        out = value * k + out * (1.0 - k)
-    return out
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.slow) + 5)
-    if len(bars) < int(ctx.slow) + 5:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    fast = _ema(closes[-int(ctx.fast):], int(ctx.fast))
-    slow = _ema(closes[-int(ctx.slow):], int(ctx.slow))
-    trend = fast > slow if side == "long" else fast < slow
-    pullback = price <= fast * (1.0 - float(ctx.pullback_pct)) if side == "long" else price >= fast * (1.0 + float(ctx.pullback_pct))
-    if _has_pos(ctx, side):
-        if not trend:
-            ctx.order_target(0, side=side, reason="ema_trend_exit")
-        return
-    if trend and pullback:
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="ema_pullback_entry")
-$qdtpl9$, '{"params":[{"name":"fast_ema","type":"integer","default":20,"min":2,"max":200,"step":1},{"name":"slow_ema","type":"integer","default":80,"min":5,"max":400,"step":1},{"name":"pullback_pct","type":"percent","default":0.015,"min":0.001,"max":0.2,"step":0.001},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["trend","ema","pullback"]'::jsonb, 'line-chart', 'green', 10, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('donchian_breakout', 'Donchian Breakout', 'Donchian channel breakout with opposite-channel exit.', $qdtpl10$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.06
-
-def on_init(ctx):
-    ctx.entry_lookback = ctx.param("entry_lookback", 55)
-    ctx.exit_lookback = ctx.param("exit_lookback", 20)
-    ctx.target_pct = ctx.param("target_pct", 0.4)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.entry_lookback), int(ctx.exit_lookback)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    entry_window = bars[-int(ctx.entry_lookback)-1:-1]
-    exit_window = bars[-int(ctx.exit_lookback)-1:-1]
-    high = max([float(b["high"]) for b in entry_window])
-    low = min([float(b["low"]) for b in entry_window])
-    exit_high = max([float(b["high"]) for b in exit_window])
-    exit_low = min([float(b["low"]) for b in exit_window])
-    if _has_pos(ctx, side):
-        if (side == "long" and price < exit_low) or (side == "short" and price > exit_high):
-            ctx.order_target(0, side=side, reason="donchian_exit")
-        return
-    if (side == "long" and price > high) or (side == "short" and price < low):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="donchian_breakout")
-$qdtpl10$, '{"params":[{"name":"entry_lookback","type":"integer","default":55,"min":10,"max":300,"step":1},{"name":"exit_lookback","type":"integer","default":20,"min":5,"max":200,"step":1},{"name":"target_pct","type":"percent","default":0.4,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["breakout","channel"]'::jsonb, 'rise', 'cyan', 20, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('atr_channel_breakout', 'ATR Channel Breakout', 'ATR envelope breakout around a moving average with channel re-entry exit.', $qdtpl11$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.05
-
-def on_init(ctx):
-    ctx.ma_period = ctx.param("ma_period", 40)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.atr_mult = ctx.param("atr_mult", 2.0)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, max(h - pc, pc - h), max(pc - l, l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.ma_period), int(ctx.atr_period)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars[-int(ctx.ma_period):]]
-    mid = sum(closes) / len(closes)
-    atr = _atr(bars, int(ctx.atr_period))
-    upper = mid + atr * float(ctx.atr_mult)
-    lower = mid - atr * float(ctx.atr_mult)
-    if _has_pos(ctx, side):
-        if (side == "long" and price < mid) or (side == "short" and price > mid):
-            ctx.order_target(0, side=side, reason="atr_channel_exit")
-        return
-    if (side == "long" and price > upper) or (side == "short" and price < lower):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="atr_channel_breakout")
-$qdtpl11$, '{"params":[{"name":"ma_period","type":"integer","default":40,"min":5,"max":300,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"atr_mult","type":"number","default":2,"min":0.5,"max":8,"step":0.1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["atr","breakout"]'::jsonb, 'area-chart', 'orange', 30, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('rsi_mean_reversion', 'RSI Mean Reversion', 'RSI exhaustion entry with midline recovery exit.', $qdtpl12$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.05
-
-def on_init(ctx):
-    ctx.period = ctx.param("period", 14)
-    ctx.oversold = ctx.param("oversold", 30)
-    ctx.overbought = ctx.param("overbought", 70)
-    ctx.exit_level = ctx.param("exit_level", 50)
-    ctx.target_pct = ctx.param("target_pct", 0.25)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _rsi(values, period):
-    gains = []
-    losses = []
-    for i in range(len(values) - int(period), len(values)):
-        change = values[i] - values[i - 1]
-        gains.append(max(change, 0.0))
-        losses.append(max(-change, 0.0))
-    avg_gain = sum(gains) / len(gains) if gains else 0.0
-    avg_loss = sum(losses) / len(losses) if losses else 0.0
-    if avg_loss <= 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - 100.0 / (1.0 + rs)
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.period) + 2)
-    if len(bars) < int(ctx.period) + 2:
-        return
-    closes = [float(b["close"]) for b in bars]
-    rsi = _rsi(closes, int(ctx.period))
-    if _has_pos(ctx, side):
-        if (side == "long" and rsi >= float(ctx.exit_level)) or (side == "short" and rsi <= float(ctx.exit_level)):
-            ctx.order_target(0, side=side, reason="rsi_reversion_exit")
-        return
-    if (side == "long" and rsi <= float(ctx.oversold)) or (side == "short" and rsi >= float(ctx.overbought)):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="rsi_reversion_entry")
-$qdtpl12$, '{"params":[{"name":"period","type":"integer","default":14,"min":3,"max":80,"step":1},{"name":"oversold","type":"number","default":30,"min":5,"max":50,"step":1},{"name":"overbought","type":"number","default":70,"min":50,"max":95,"step":1},{"name":"exit_level","type":"number","default":50,"min":20,"max":80,"step":1},{"name":"target_pct","type":"percent","default":0.25,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["rsi","reversion"]'::jsonb, 'refresh', 'blue', 40, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('macd_momentum', 'MACD Momentum', 'MACD line and signal-line momentum strategy.', $qdtpl13$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.04
-
-def on_init(ctx):
-    ctx.fast = ctx.param("fast", 12)
-    ctx.slow = ctx.param("slow", 26)
-    ctx.signal = ctx.param("signal", 9)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _ema_series(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = []
-    ema = values[0]
-    for value in values:
-        ema = value * k + ema * (1.0 - k)
-        out.append(ema)
-    return out
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = int(ctx.slow) + int(ctx.signal) + 10
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    closes = [float(b["close"]) for b in bars]
-    fast = _ema_series(closes, int(ctx.fast))
-    slow = _ema_series(closes, int(ctx.slow))
-    macd = [fast[i] - slow[i] for i in range(len(closes))]
-    signal = _ema_series(macd, int(ctx.signal))
-    bullish = macd[-1] > signal[-1]
-    if _has_pos(ctx, side):
-        if (side == "long" and not bullish) or (side == "short" and bullish):
-            ctx.order_target(0, side=side, reason="macd_momentum_exit")
-        return
-    if (side == "long" and bullish) or (side == "short" and not bullish):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="macd_momentum_entry")
-$qdtpl13$, '{"params":[{"name":"fast","type":"integer","default":12,"min":2,"max":80,"step":1},{"name":"slow","type":"integer","default":26,"min":5,"max":160,"step":1},{"name":"signal","type":"integer","default":9,"min":2,"max":80,"step":1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["macd","momentum"]'::jsonb, 'exchange', 'purple', 50, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('bollinger_reversion', 'Bollinger Reversion', 'Bollinger band mean reversion with middle-band exit.', $qdtpl14$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.06
-
-def on_init(ctx):
-    ctx.period = ctx.param("period", 20)
-    ctx.std_mult = ctx.param("std_mult", 2.0)
-    ctx.target_pct = ctx.param("target_pct", 0.25)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _mean(values):
-    return sum(values) / len(values) if values else 0.0
-
-def _std(values):
-    mean = _mean(values)
-    return (sum([(v - mean) * (v - mean) for v in values]) / len(values)) ** 0.5 if values else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.period) + 1)
-    if len(bars) < int(ctx.period) + 1:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars[-int(ctx.period)-1:-1]]
-    mid = _mean(closes)
-    dev = _std(closes)
-    upper = mid + dev * float(ctx.std_mult)
-    lower = mid - dev * float(ctx.std_mult)
-    if _has_pos(ctx, side):
-        if (side == "long" and price >= mid) or (side == "short" and price <= mid):
-            ctx.order_target(0, side=side, reason="bollinger_mid_exit")
-        return
-    if (side == "long" and price <= lower) or (side == "short" and price >= upper):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="bollinger_reversion_entry")
-$qdtpl14$, '{"params":[{"name":"period","type":"integer","default":20,"min":5,"max":240,"step":1},{"name":"std_mult","type":"number","default":2,"min":0.5,"max":5,"step":0.1},{"name":"target_pct","type":"percent","default":0.25,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["bollinger","reversion"]'::jsonb, 'stock', 'teal', 60, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('turtle_breakout_lite', 'Turtle Breakout Lite', 'Compact Turtle-style breakout using entry/exit channels and ATR risk guard.', $qdtpl15$# timeframe: 1D
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.08
-
-def on_init(ctx):
-    ctx.entry_lookback = ctx.param("entry_lookback", 20)
-    ctx.exit_lookback = ctx.param("exit_lookback", 10)
-    ctx.atr_period = ctx.param("atr_period", 20)
-    ctx.atr_stop = ctx.param("atr_stop", 2.0)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _entry(ctx, side, fallback):
-    return float(ctx.positions[side]["entry_price"] or fallback)
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, max(h - pc, pc - h), max(pc - l, l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.entry_lookback), int(ctx.exit_lookback), int(ctx.atr_period)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    atr = _atr(bars, int(ctx.atr_period))
-    entry_window = bars[-int(ctx.entry_lookback)-1:-1]
-    exit_window = bars[-int(ctx.exit_lookback)-1:-1]
-    high = max([float(b["high"]) for b in entry_window])
-    low = min([float(b["low"]) for b in entry_window])
-    exit_high = max([float(b["high"]) for b in exit_window])
-    exit_low = min([float(b["low"]) for b in exit_window])
-    if _has_pos(ctx, side):
-        entry = _entry(ctx, side, price)
-        stop = price <= entry - atr * float(ctx.atr_stop) if side == "long" else price >= entry + atr * float(ctx.atr_stop)
-        channel_exit = price < exit_low if side == "long" else price > exit_high
-        if stop or channel_exit:
-            ctx.order_target(0, side=side, reason="turtle_exit")
-        return
-    if (side == "long" and price > high) or (side == "short" and price < low):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="turtle_breakout")
-$qdtpl15$, '{"params":[{"name":"entry_lookback","type":"integer","default":20,"min":5,"max":120,"step":1},{"name":"exit_lookback","type":"integer","default":10,"min":3,"max":80,"step":1},{"name":"atr_period","type":"integer","default":20,"min":3,"max":120,"step":1},{"name":"atr_stop","type":"number","default":2,"min":0.5,"max":8,"step":0.1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["turtle","breakout"]'::jsonb, 'flag', 'red', 70, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW()),
-
-('volatility_stop_trend', 'Volatility Stop Trend', 'Trend-following entry with ATR volatility stop that ratchets with price.', $qdtpl16$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-# @strategy stopLossPct 0.05
-
-def on_init(ctx):
-    ctx.ema_period = ctx.param("ema_period", 50)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.stop_atr = ctx.param("stop_atr", 2.5)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _ema(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = values[0]
-    for value in values[1:]:
-        out = value * k + out * (1.0 - k)
-    return out
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, max(h - pc, pc - h), max(pc - l, l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.ema_period), int(ctx.atr_period)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    ema = _ema(closes[-int(ctx.ema_period):], int(ctx.ema_period))
-    atr = _atr(bars, int(ctx.atr_period))
-    key = "vol_stop_" + side
-    trend = price > ema if side == "long" else price < ema
-    if _has_pos(ctx, side):
-        old_stop = float(ctx.state.get(key, 0.0) or 0.0)
-        new_stop = price - atr * float(ctx.stop_atr) if side == "long" else price + atr * float(ctx.stop_atr)
-        stop = max(old_stop, new_stop) if side == "long" and old_stop > 0 else new_stop
-        stop = min(old_stop, new_stop) if side == "short" and old_stop > 0 else stop
-        ctx.state.set(key, stop)
-        if (side == "long" and price <= stop) or (side == "short" and price >= stop):
-            ctx.order_target(0, side=side, reason="volatility_stop_exit")
-        return
-    if trend:
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="volatility_trend_entry")
-        ctx.state.set(key, price - atr * float(ctx.stop_atr) if side == "long" else price + atr * float(ctx.stop_atr))
-$qdtpl16$, '{"params":[{"name":"ema_period","type":"integer","default":50,"min":5,"max":300,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"stop_atr","type":"number","default":2.5,"min":0.5,"max":12,"step":0.1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["trend","volatility","atr"]'::jsonb, 'shield-o', 'green', 80, TRUE, '{"source":"system_seed","version":2}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
-
--- ===== Script strategy templates v3 seed =====
-UPDATE qd_script_templates
-SET is_active = FALSE, updated_at = NOW()
-WHERE template_key IN (
-    'classic_ema_atr_trend',
-    'donchian_breakout_pyramid',
-    'bollinger_reversion_basket',
-    'range_grid_basket',
-    'dca_accumulator',
-    'sequential_martingale',
-    'layered_martingale_basket',
-    'keltner_retest_breakout'
-);
-
-INSERT INTO qd_script_templates
-(template_key, title, description, code, param_schema, tags, icon, accent, sort_order, is_active, metadata, updated_at)
-VALUES
-('ema_trend_pullback', 'EMA Trend Pullback', 'EMA swing trend filter with pullback recovery entry, EMA failure exit, and engine trailing risk.', $qdtplv3_1$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.025
-# @strategy takeProfitPct 0.045
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.012
-# @strategy trailingActivationPct 0.018
-# @strategy maxHoldingBars 36
-
-def on_init(ctx):
-    ctx.fast_ema = ctx.param("fast_ema", 8)
-    ctx.slow_ema = ctx.param("slow_ema", 21)
-    ctx.atr_period = ctx.param("atr_period", 10)
-    ctx.pullback_pct = ctx.param("pullback_pct", 0.002)
-    ctx.min_atr_pct = ctx.param("min_atr_pct", 0.0)
-    ctx.exit_buffer_pct = ctx.param("exit_buffer_pct", 0.002)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 1)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _requested_sides(ctx):
-    direction = str(ctx.direction).lower()
-    if direction == "both":
-        return ("long", "short")
-    return ("short",) if direction == "short" else ("long",)
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _bar_no(ctx):
-    return int(ctx.current_index)
-
-def _ema(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = values[0]
-    for value in values[1:]:
-        out = value * k + out * (1.0 - k)
-    return out
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def _signals(ctx, side, price, fast, slow, prev_close, prev_fast, liquid):
-    trend = fast > slow if side == "long" else fast < slow
-    if side == "long":
-        recovered = prev_close <= prev_fast * (1.0 - float(ctx.pullback_pct)) and price > fast
-        rejoined = prev_close <= slow and price > fast and price > prev_close
-        failed = price < fast * (1.0 - float(ctx.exit_buffer_pct)) or fast < slow
-    else:
-        recovered = prev_close >= prev_fast * (1.0 + float(ctx.pullback_pct)) and price < fast
-        rejoined = prev_close >= slow and price < fast and price < prev_close
-        failed = price > fast * (1.0 + float(ctx.exit_buffer_pct)) or fast > slow
-    return trend and liquid and (recovered or rejoined), failed
-
-def on_bar(ctx, bar):
-    need = max(int(ctx.slow_ema), int(ctx.atr_period)) + 5
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    closes = [float(b["close"]) for b in bars]
-    price = float(bar["close"])
-    fast = _ema(closes[-int(ctx.fast_ema):], int(ctx.fast_ema))
-    slow = _ema(closes[-int(ctx.slow_ema):], int(ctx.slow_ema))
-    prev_fast = _ema(closes[-int(ctx.fast_ema)-1:-1], int(ctx.fast_ema))
-    prev_close = closes[-2]
-    atr = _atr(bars, int(ctx.atr_period))
-    liquid = atr / price >= float(ctx.min_atr_pct) if price > 0 else False
-    sides = _requested_sides(ctx)
-    signals = {}
-    closing = set()
-    for side in sides:
-        entry, failed = _signals(ctx, side, price, fast, slow, prev_close, prev_fast, liquid)
-        signals[side] = entry
-        if _has_pos(ctx, side) and failed:
-            closing.add(side)
-            ctx.state.set(side + "_cooldown_until", _bar_no(ctx) + int(ctx.cooldown_bars))
-            ctx.order_target(0, side=side, reason="ema_pullback_exit")
-    for side in sides:
-        if _has_pos(ctx, side):
-            continue
-        opposite = "short" if side == "long" else "long"
-        if _has_pos(ctx, opposite) and opposite not in closing:
-            continue
-        cooldown_until = int(ctx.state.get(side + "_cooldown_until", -1) or -1)
-        if _bar_no(ctx) < cooldown_until:
-            continue
-        if signals.get(side):
-            ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="ema_pullback_recovery")
-$qdtplv3_1$, '{"params":[{"name":"fast_ema","type":"integer","default":8,"min":2,"max":200,"step":1},{"name":"slow_ema","type":"integer","default":21,"min":5,"max":400,"step":1},{"name":"atr_period","type":"integer","default":10,"min":3,"max":120,"step":1},{"name":"pullback_pct","type":"percent","default":0.002,"min":0,"max":0.2,"step":0.001},{"name":"min_atr_pct","type":"percent","default":0,"min":0,"max":0.1,"step":0.001},{"name":"exit_buffer_pct","type":"percent","default":0.002,"min":0,"max":0.1,"step":0.001},{"name":"cooldown_bars","type":"integer","default":1,"min":0,"max":100,"step":1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["trend","ema","pullback","trailing"]'::jsonb, 'line-chart', 'green', 10, TRUE, '{"source":"system_seed","version":4}'::jsonb, NOW()),
-
-('donchian_breakout', 'Donchian Breakout', 'Classic channel breakout with ATR volatility gate, channel exit, and max-hold safety.', $qdtplv3_2$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.055
-# @strategy takeProfitPct 0.12
-# @strategy maxHoldingBars 120
-
-def on_init(ctx):
-    ctx.entry_lookback = ctx.param("entry_lookback", 55)
-    ctx.exit_lookback = ctx.param("exit_lookback", 20)
-    ctx.atr_period = ctx.param("atr_period", 20)
-    ctx.min_range_atr = ctx.param("min_range_atr", 2.0)
-    ctx.target_pct = ctx.param("target_pct", 0.4)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.entry_lookback), int(ctx.exit_lookback), int(ctx.atr_period)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    entry_window = bars[-int(ctx.entry_lookback)-1:-1]
-    exit_window = bars[-int(ctx.exit_lookback)-1:-1]
-    high = max(float(b["high"]) for b in entry_window)
-    low = min(float(b["low"]) for b in entry_window)
-    exit_high = max(float(b["high"]) for b in exit_window)
-    exit_low = min(float(b["low"]) for b in exit_window)
-    atr = _atr(bars, int(ctx.atr_period))
-    wide_enough = (high - low) >= atr * float(ctx.min_range_atr)
-    if _has_pos(ctx, side):
-        if (side == "long" and price < exit_low) or (side == "short" and price > exit_high):
-            ctx.order_target(0, side=side, reason="donchian_channel_exit")
-        return
-    if wide_enough and ((side == "long" and price > high) or (side == "short" and price < low)):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="donchian_breakout")
-$qdtplv3_2$, '{"params":[{"name":"entry_lookback","type":"integer","default":55,"min":10,"max":300,"step":1},{"name":"exit_lookback","type":"integer","default":20,"min":5,"max":200,"step":1},{"name":"atr_period","type":"integer","default":20,"min":3,"max":120,"step":1},{"name":"min_range_atr","type":"number","default":2,"min":0,"max":10,"step":0.1},{"name":"target_pct","type":"percent","default":0.4,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["breakout","channel","trend"]'::jsonb, 'rise', 'cyan', 20, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('atr_channel_breakout', 'ATR Channel Breakout', 'ATR envelope breakout around an EMA baseline with trend-strength and midline exits.', $qdtplv3_3$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.045
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.02
-# @strategy trailingActivationPct 0.04
-
-def on_init(ctx):
-    ctx.ema_period = ctx.param("ema_period", 48)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.atr_mult = ctx.param("atr_mult", 2.2)
-    ctx.slope_lookback = ctx.param("slope_lookback", 6)
-    ctx.target_pct = ctx.param("target_pct", 0.32)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _ema(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = values[0]
-    for value in values[1:]:
-        out = value * k + out * (1.0 - k)
-    return out
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.ema_period), int(ctx.atr_period)) + int(ctx.slope_lookback) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    ema = _ema(closes[-int(ctx.ema_period):], int(ctx.ema_period))
-    ema_prev = _ema(closes[-int(ctx.ema_period)-int(ctx.slope_lookback):-int(ctx.slope_lookback)], int(ctx.ema_period))
-    atr = _atr(bars, int(ctx.atr_period))
-    upper = ema + atr * float(ctx.atr_mult)
-    lower = ema - atr * float(ctx.atr_mult)
-    slope_ok = ema > ema_prev if side == "long" else ema < ema_prev
-    if _has_pos(ctx, side):
-        if (side == "long" and price < ema) or (side == "short" and price > ema):
-            ctx.order_target(0, side=side, reason="atr_channel_mid_exit")
-        return
-    if slope_ok and ((side == "long" and price > upper) or (side == "short" and price < lower)):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="atr_channel_breakout")
-$qdtplv3_3$, '{"params":[{"name":"ema_period","type":"integer","default":48,"min":5,"max":300,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"atr_mult","type":"number","default":2.2,"min":0.5,"max":8,"step":0.1},{"name":"slope_lookback","type":"integer","default":6,"min":1,"max":50,"step":1},{"name":"target_pct","type":"percent","default":0.32,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["atr","breakout","trailing"]'::jsonb, 'area-chart', 'orange', 30, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('rsi_mean_reversion', 'RSI Mean Reversion', 'RSI exhaustion strategy with regime filter, confirmation candle, fixed target, and time stop.', $qdtplv3_4$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.035
-# @strategy takeProfitPct 0.055
-# @strategy maxHoldingBars 36
-
-def on_init(ctx):
-    ctx.rsi_period = ctx.param("rsi_period", 14)
-    ctx.regime_period = ctx.param("regime_period", 120)
-    ctx.oversold = ctx.param("oversold", 32)
-    ctx.overbought = ctx.param("overbought", 68)
-    ctx.exit_level = ctx.param("exit_level", 50)
-    ctx.target_pct = ctx.param("target_pct", 0.24)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _sma(values):
-    return sum(values) / len(values) if values else 0.0
-
-def _rsi(values, period):
-    gains = []
-    losses = []
-    for i in range(len(values) - int(period), len(values)):
-        change = values[i] - values[i - 1]
-        gains.append(max(change, 0.0))
-        losses.append(max(-change, 0.0))
-    avg_gain = _sma(gains)
-    avg_loss = _sma(losses)
-    if avg_loss <= 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - 100.0 / (1.0 + rs)
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.rsi_period) + 3, int(ctx.regime_period) + 1)
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    closes = [float(b["close"]) for b in bars]
-    price = closes[-1]
-    prev = closes[-2]
-    regime = _sma(closes[-int(ctx.regime_period):])
-    rsi = _rsi(closes, int(ctx.rsi_period))
-    regime_ok = price >= regime if side == "long" else price <= regime
-    confirm = price > prev if side == "long" else price < prev
-    if _has_pos(ctx, side):
-        if (side == "long" and rsi >= float(ctx.exit_level)) or (side == "short" and rsi <= float(ctx.exit_level)):
-            ctx.order_target(0, side=side, reason="rsi_midline_exit")
-        return
-    if regime_ok and confirm and ((side == "long" and rsi <= float(ctx.oversold)) or (side == "short" and rsi >= float(ctx.overbought))):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="rsi_confirmed_reversion")
-$qdtplv3_4$, '{"params":[{"name":"rsi_period","type":"integer","default":14,"min":3,"max":80,"step":1},{"name":"regime_period","type":"integer","default":120,"min":20,"max":400,"step":1},{"name":"oversold","type":"number","default":32,"min":5,"max":50,"step":1},{"name":"overbought","type":"number","default":68,"min":50,"max":95,"step":1},{"name":"exit_level","type":"number","default":50,"min":20,"max":80,"step":1},{"name":"target_pct","type":"percent","default":0.24,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["rsi","reversion","mean-reversion"]'::jsonb, 'sync', 'blue', 40, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('macd_momentum', 'MACD Momentum', 'MACD histogram expansion with EMA regime filter, signal crossover entry, and momentum decay exit.', $qdtplv3_5$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.04
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.022
-# @strategy trailingActivationPct 0.045
-
-def on_init(ctx):
-    ctx.fast = ctx.param("fast", 12)
-    ctx.slow = ctx.param("slow", 26)
-    ctx.signal = ctx.param("signal", 9)
-    ctx.regime_ema = ctx.param("regime_ema", 100)
-    ctx.target_pct = ctx.param("target_pct", 0.34)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _ema_series(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    ema = values[0]
-    out = []
-    for value in values:
-        ema = value * k + ema * (1.0 - k)
-        out.append(ema)
-    return out
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.regime_ema), int(ctx.slow) + int(ctx.signal) + 10)
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    closes = [float(b["close"]) for b in bars]
-    fast = _ema_series(closes, int(ctx.fast))
-    slow = _ema_series(closes, int(ctx.slow))
-    macd = [fast[i] - slow[i] for i in range(len(closes))]
-    sig = _ema_series(macd, int(ctx.signal))
-    hist = [macd[i] - sig[i] for i in range(len(macd))]
-    regime = _ema_series(closes, int(ctx.regime_ema))[-1]
-    long_signal = hist[-1] > 0 and hist[-1] > hist[-2]
-    short_signal = hist[-1] < 0 and hist[-1] < hist[-2]
-    long_decay = hist[-1] < hist[-2]
-    short_decay = hist[-1] > hist[-2]
-    regime_ok = closes[-1] > regime if side == "long" else closes[-1] < regime
-    if _has_pos(ctx, side):
-        if (side == "long" and long_decay) or (side == "short" and short_decay):
-            ctx.order_target(0, side=side, reason="macd_histogram_exit")
-        return
-    if regime_ok and ((side == "long" and long_signal) or (side == "short" and short_signal)):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="macd_momentum_cross")
-$qdtplv3_5$, '{"params":[{"name":"fast","type":"integer","default":12,"min":2,"max":80,"step":1},{"name":"slow","type":"integer","default":26,"min":5,"max":160,"step":1},{"name":"signal","type":"integer","default":9,"min":2,"max":80,"step":1},{"name":"regime_ema","type":"integer","default":100,"min":20,"max":400,"step":1},{"name":"target_pct","type":"percent","default":0.34,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["macd","momentum","trailing"]'::jsonb, 'swap', 'purple', 50, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('bollinger_reversion', 'Bollinger Reversion', 'Bollinger z-score reversion with bandwidth filter, mid-band exit, and fixed engine target.', $qdtplv3_6$# timeframe: 1H
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.045
-# @strategy takeProfitPct 0.065
-# @strategy maxHoldingBars 48
-
-def on_init(ctx):
-    ctx.period = ctx.param("period", 20)
-    ctx.std_mult = ctx.param("std_mult", 2.1)
-    ctx.min_bandwidth = ctx.param("min_bandwidth", 0.015)
-    ctx.exit_z = ctx.param("exit_z", 0.15)
-    ctx.target_pct = ctx.param("target_pct", 0.25)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _mean(values):
-    return sum(values) / len(values) if values else 0.0
-
-def _std(values):
-    mean = _mean(values)
-    return (sum((v - mean) * (v - mean) for v in values) / len(values)) ** 0.5 if values else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    bars = ctx.bars(int(ctx.period) + 2)
-    if len(bars) < int(ctx.period) + 2:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars[-int(ctx.period)-1:-1]]
-    mid = _mean(closes)
-    dev = _std(closes)
-    if dev <= 0 or mid <= 0:
-        return
-    upper = mid + dev * float(ctx.std_mult)
-    lower = mid - dev * float(ctx.std_mult)
-    bandwidth = (upper - lower) / mid
-    z = (price - mid) / dev
-    if _has_pos(ctx, side):
-        if abs(z) <= float(ctx.exit_z):
-            ctx.order_target(0, side=side, reason="bollinger_z_exit")
-        return
-    if bandwidth >= float(ctx.min_bandwidth) and ((side == "long" and price <= lower) or (side == "short" and price >= upper)):
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="bollinger_band_reversion")
-$qdtplv3_6$, '{"params":[{"name":"period","type":"integer","default":20,"min":5,"max":240,"step":1},{"name":"std_mult","type":"number","default":2.1,"min":0.5,"max":5,"step":0.1},{"name":"min_bandwidth","type":"percent","default":0.015,"min":0,"max":0.2,"step":0.001},{"name":"exit_z","type":"number","default":0.15,"min":0,"max":2,"step":0.05},{"name":"target_pct","type":"percent","default":0.25,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["bollinger","reversion","zscore"]'::jsonb, 'stock', 'teal', 60, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('turtle_breakout_lite', 'Turtle Breakout Lite', 'Turtle-style channel breakout with ATR unit sizing, one add-on unit, and channel exits.', $qdtplv3_7$# timeframe: 1D
-# signal_timing: next_bar_open
-# exit_owner: engine
-# @strategy stopLossPct 0.08
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.04
-# @strategy trailingActivationPct 0.08
-
-def on_init(ctx):
-    ctx.entry_lookback = ctx.param("entry_lookback", 20)
-    ctx.exit_lookback = ctx.param("exit_lookback", 10)
-    ctx.atr_period = ctx.param("atr_period", 20)
-    ctx.risk_pct = ctx.param("risk_pct", 0.01)
-    ctx.add_atr = ctx.param("add_atr", 0.5)
-    ctx.max_target_pct = ctx.param("max_target_pct", 0.5)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.entry_lookback), int(ctx.exit_lookback), int(ctx.atr_period)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    atr = _atr(bars, int(ctx.atr_period))
-    if price <= 0 or atr <= 0:
-        return
-    entry_window = bars[-int(ctx.entry_lookback)-1:-1]
-    exit_window = bars[-int(ctx.exit_lookback)-1:-1]
-    high = max(float(b["high"]) for b in entry_window)
-    low = min(float(b["low"]) for b in entry_window)
-    exit_high = max(float(b["high"]) for b in exit_window)
-    exit_low = min(float(b["low"]) for b in exit_window)
-    unit_value = min(float(ctx.equity) * float(ctx.max_target_pct) * 0.5, float(ctx.equity) * float(ctx.risk_pct) * price / atr)
-    if _has_pos(ctx, side):
-        entry = float(ctx.positions[side]["entry_price"] or price)
-        added_key = "turtle_added_" + side
-        add_trigger = price >= entry + atr * float(ctx.add_atr) if side == "long" else price <= entry - atr * float(ctx.add_atr)
-        if add_trigger and not bool(ctx.state.get(added_key, False)):
-            ctx.order_value(unit_value, side=side, reason="turtle_add_unit")
-            ctx.state.set(added_key, True)
-        if (side == "long" and price < exit_low) or (side == "short" and price > exit_high):
-            ctx.order_target(0, side=side, reason="turtle_channel_exit")
-            ctx.state.set(added_key, False)
-        return
-    if (side == "long" and price > high) or (side == "short" and price < low):
-        ctx.order_value(unit_value, side=side, reason="turtle_breakout")
-$qdtplv3_7$, '{"params":[{"name":"entry_lookback","type":"integer","default":20,"min":5,"max":120,"step":1},{"name":"exit_lookback","type":"integer","default":10,"min":3,"max":80,"step":1},{"name":"atr_period","type":"integer","default":20,"min":3,"max":120,"step":1},{"name":"risk_pct","type":"percent","default":0.01,"min":0.001,"max":0.1,"step":0.001},{"name":"add_atr","type":"number","default":0.5,"min":0.1,"max":4,"step":0.1},{"name":"max_target_pct","type":"percent","default":0.5,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["turtle","breakout","atr","trailing"]'::jsonb, 'flag', 'red', 70, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW()),
-
-('volatility_stop_trend', 'Volatility Stop Trend', 'Trend-following EMA entry with an ATR volatility stop maintained in script state.', $qdtplv3_8$# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: strategy
-
-def on_init(ctx):
-    ctx.ema_period = ctx.param("ema_period", 55)
-    ctx.atr_period = ctx.param("atr_period", 14)
-    ctx.stop_atr = ctx.param("stop_atr", 2.8)
-    ctx.breakout_lookback = ctx.param("breakout_lookback", 12)
-    ctx.target_pct = ctx.param("target_pct", 0.35)
-
-def _side(ctx):
-    return "short" if str(ctx.direction).lower() == "short" else "long"
-
-def _has_pos(ctx, side):
-    return float(ctx.positions[side]["size"] or 0.0) > 0
-
-def _ema(values, period):
-    k = 2.0 / (float(period) + 1.0)
-    out = values[0]
-    for value in values[1:]:
-        out = value * k + out * (1.0 - k)
-    return out
-
-def _atr(bars, period):
-    trs = []
-    for i in range(len(bars) - int(period), len(bars)):
-        h = float(bars[i]["high"])
-        l = float(bars[i]["low"])
-        pc = float(bars[i - 1]["close"])
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    return sum(trs) / len(trs) if trs else 0.0
-
-def on_bar(ctx, bar):
-    side = _side(ctx)
-    need = max(int(ctx.ema_period), int(ctx.atr_period), int(ctx.breakout_lookback)) + 2
-    bars = ctx.bars(need)
-    if len(bars) < need:
-        return
-    price = float(bar["close"])
-    closes = [float(b["close"]) for b in bars]
-    ema = _ema(closes[-int(ctx.ema_period):], int(ctx.ema_period))
-    atr = _atr(bars, int(ctx.atr_period))
-    high = max(float(b["high"]) for b in bars[-int(ctx.breakout_lookback)-1:-1])
-    low = min(float(b["low"]) for b in bars[-int(ctx.breakout_lookback)-1:-1])
-    key = "vol_stop_" + side
-    if _has_pos(ctx, side):
-        old_stop = float(ctx.state.get(key, 0.0) or 0.0)
-        candidate = price - atr * float(ctx.stop_atr) if side == "long" else price + atr * float(ctx.stop_atr)
-        stop = max(old_stop, candidate) if side == "long" and old_stop > 0 else candidate
-        stop = min(old_stop, candidate) if side == "short" and old_stop > 0 else stop
-        ctx.state.set(key, stop)
-        if (side == "long" and price <= stop) or (side == "short" and price >= stop):
-            ctx.order_target(0, side=side, reason="volatility_stop_exit")
-        return
-    trend = price > ema and price > high if side == "long" else price < ema and price < low
-    if trend:
-        ctx.order_value(float(ctx.equity) * float(ctx.target_pct), side=side, reason="volatility_trend_entry")
-        ctx.state.set(key, price - atr * float(ctx.stop_atr) if side == "long" else price + atr * float(ctx.stop_atr))
-$qdtplv3_8$, '{"params":[{"name":"ema_period","type":"integer","default":55,"min":5,"max":300,"step":1},{"name":"atr_period","type":"integer","default":14,"min":3,"max":120,"step":1},{"name":"stop_atr","type":"number","default":2.8,"min":0.5,"max":12,"step":0.1},{"name":"breakout_lookback","type":"integer","default":12,"min":3,"max":100,"step":1},{"name":"target_pct","type":"percent","default":0.35,"min":0.01,"max":1,"step":0.01}]}'::jsonb, '["trend","volatility","atr","stateful-stop"]'::jsonb, 'safety', 'green', 80, TRUE, '{"source":"system_seed","version":3}'::jsonb, NOW())
-ON CONFLICT (template_key) DO UPDATE SET
-    title = EXCLUDED.title,
-    description = EXCLUDED.description,
-    code = EXCLUDED.code,
-    param_schema = EXCLUDED.param_schema,
-    tags = EXCLUDED.tags,
-    icon = EXCLUDED.icon,
-    accent = EXCLUDED.accent,
-    sort_order = EXCLUDED.sort_order,
-    is_active = TRUE,
-    metadata = EXCLUDED.metadata,
-    updated_at = NOW();
+-- Strategy API V2 templates are seeded by strategy_v2_templates.sql.
 
 -- =============================================================================
 -- Completion Notice

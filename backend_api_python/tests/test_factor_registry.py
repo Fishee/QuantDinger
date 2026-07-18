@@ -4,7 +4,6 @@ import numpy as np
 
 from app.services.factors import FactorError, compute_factor, compute_panel_factor, list_factors
 from app.services.factors.research import information_coefficient, quantile_returns, winsorize_zscore
-from app.services.strategy_script_runtime import ScriptBar, StrategyScriptContext, compile_strategy_script_handlers
 from app.utils.technical_indicators import compute_kdj_cn, compute_rsi_wilder
 
 
@@ -84,22 +83,6 @@ def test_all_registered_technical_factors_compute_finite_defaults():
         assert np.isfinite(value), definition["factor_id"]
 
 
-def test_cta_factor_uses_only_bars_visible_at_current_index():
-    frame = pd.DataFrame({
-        "open": [100, 110, 999],
-        "high": [101, 111, 1000],
-        "low": [99, 109, 998],
-        "close": [100, 110, 999],
-        "volume": [10, 20, 30],
-    })
-    context = StrategyScriptContext(frame, 10_000)
-    context.current_index = 1
-    assert context.factor("sma", period=2) == pytest.approx(105.0)
-    with pytest.raises(FactorError) as caught:
-        context.factor("market_cap")
-    assert caught.value.code == "factor.contextNotSupported"
-
-
 def test_registered_rsi_and_kdj_match_shared_terminal_conventions():
     close = [100, 101, 102, 101, 100, 99, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107]
     high = [value + 1 for value in close]
@@ -109,26 +92,6 @@ def test_registered_rsi_and_kdj_match_shared_terminal_conventions():
     _k, _d, j = compute_kdj_cn(high, low, close, 9, 3, 3)
     assert compute_factor("rsi", frame, {"period": 14}) == pytest.approx(rsi)
     assert compute_factor("kdj", frame, {"period": 9, "k_period": 3, "d_period": 3, "output": "j"}) == pytest.approx(j[-1], abs=1e-4)
-
-
-def test_compiled_cta_script_can_call_registered_factor():
-    frame = pd.DataFrame({
-        "open": np.arange(1, 25, dtype=float),
-        "high": np.arange(2, 26, dtype=float),
-        "low": np.arange(0, 24, dtype=float),
-        "close": np.arange(1, 25, dtype=float),
-        "volume": np.full(24, 100.0),
-    })
-    _on_init, on_bar = compile_strategy_script_handlers('''
-def on_bar(ctx, bar):
-    value = ctx.factor("rsi", period=14)
-    if np.isfinite(value):
-        ctx.log("rsi=%.4f" % value)
-''')
-    context = StrategyScriptContext(frame, 10_000)
-    context.current_index = len(frame) - 1
-    on_bar(context, ScriptBar(frame.iloc[-1].to_dict()))
-    assert context.flush_logs() == ["rsi=100.0000"]
 
 
 def test_extended_factor_families_have_expected_invariants():
@@ -147,20 +110,3 @@ def test_extended_factor_families_have_expected_invariants():
     assert compute_factor("vortex", frame, {"period": 14, "output": "plus"}) > 0
     assert compute_factor("ulcer_index", frame) == pytest.approx(0.0)
     assert compute_factor("parkinson_volatility", frame) > 0
-
-
-def test_extended_cta_factor_does_not_see_future_bars():
-    close = np.linspace(100.0, 130.0, 80)
-    frame = pd.DataFrame({
-        "open": close,
-        "high": close + 1.0,
-        "low": close - 1.0,
-        "close": close,
-        "volume": np.full(80, 1_000.0),
-    })
-    context = StrategyScriptContext(frame, 10_000)
-    context.current_index = 49
-    before = context.factor("kama", period=10, fast_period=2, slow_period=30)
-    frame.loc[50:, "close"] = 10_000.0
-    after = context.factor("kama", period=10, fast_period=2, slow_period=30)
-    assert after == pytest.approx(before)

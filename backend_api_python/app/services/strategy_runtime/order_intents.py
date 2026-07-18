@@ -36,16 +36,7 @@ class OrderIntentService:
         symbol: str,
         signal_type: str,
         signal_ts: int,
-        basket_id: str = "",
-        layer_index: int = 0,
-        order_index: int = 0,
-        action: str = "",
     ) -> str:
-        if basket_id:
-            return (
-                f"run:{int(strategy_run_id or 0)}:"
-                f"basket:{basket_id}:L{int(layer_index or 0)}:O{int(order_index or 0)}:{action or signal_type}"
-            )[:180]
         return (
             f"run:{int(strategy_run_id or 0)}:"
             f"strategy:{int(strategy_id or 0)}:{symbol}:{signal_type}:{int(signal_ts or 0)}"
@@ -91,8 +82,6 @@ class OrderIntentService:
         notional: float = 0.0,
         limit_price: float = 0.0,
         execution_algo: str = "market",
-        basket_id: str = "",
-        basket_order_id: int = 0,
         portfolio_id: str = "",
         universe_id: str = "",
         rebalance_group_id: str = "",
@@ -117,7 +106,7 @@ class OrderIntentService:
                 cur.execute(
                     """
                     INSERT INTO strategy_order_intents
-                    (strategy_run_id, strategy_id, basket_id, basket_order_id, idempotency_key,
+                    (strategy_run_id, strategy_id, idempotency_key,
                      symbol, market_type, side, position_side, reduce_only, order_type,
                      quantity, notional, limit_price, execution_algo,
                      portfolio_id, universe_id, rebalance_group_id,
@@ -125,7 +114,7 @@ class OrderIntentService:
                      status, payload_json,
                      created_at, updated_at)
                     VALUES
-                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                      %s, %s, %s, %s, %s, %s,
                      'intent_created', %s, NOW(), NOW())
                     ON CONFLICT(strategy_run_id, idempotency_key) DO NOTHING
@@ -133,8 +122,6 @@ class OrderIntentService:
                     (
                         self.strategy_run_id,
                         self.strategy_id,
-                        str(basket_id or ""),
-                        int(basket_order_id or 0),
                         key,
                         str(symbol or ""),
                         str(market_type or "swap"),
@@ -193,8 +180,6 @@ class OrderIntentService:
         *,
         idempotency_key: str = "",
         leverage: float = 1.0,
-        basket_id: str = "",
-        basket_order_id: int = 0,
     ) -> OrderIntent:
         signal.validate()
         key = str(idempotency_key or "").strip()
@@ -205,14 +190,10 @@ class OrderIntentService:
                 symbol=signal.symbol,
                 signal_type=signal.action,
                 signal_ts=_signal_ts(signal.timestamp),
-                basket_id=basket_id,
-                action=signal.action,
             )
         kwargs = signal.to_order_intent_kwargs(leverage=leverage)
         return self.create_intent(
             idempotency_key=key,
-            basket_id=basket_id,
-            basket_order_id=basket_order_id,
             portfolio_id=signal.portfolio_id,
             universe_id=signal.universe_id,
             rebalance_group_id=signal.rebalance_group_id,

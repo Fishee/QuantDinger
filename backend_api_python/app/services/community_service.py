@@ -19,6 +19,65 @@ from app.services.indicator_translator import pick_localized
 logger = get_logger(__name__)
 
 
+def _strategy_contract_payload(
+    manifest: Dict[str, Any],
+    param_schema: Dict[str, Any],
+    *,
+    source: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(manifest, dict) or not manifest:
+        return None
+
+    universe = manifest.get('universe') if isinstance(manifest.get('universe'), dict) else {}
+    instruments = universe.get('instruments') if isinstance(universe.get('instruments'), list) else []
+    subscriptions = manifest.get('subscriptions') if isinstance(manifest.get('subscriptions'), list) else []
+    parameters = param_schema.get('params') if isinstance(param_schema.get('params'), list) else []
+    benchmark = manifest.get('benchmark') if isinstance(manifest.get('benchmark'), dict) else None
+
+    normalized_parameters = []
+    for item in parameters:
+        if not isinstance(item, dict) or not str(item.get('name') or '').strip():
+            continue
+        normalized_parameters.append({
+            'name': str(item.get('name') or ''),
+            'label_key': str(item.get('labelKey') or item.get('label_key') or ''),
+            'label': str(item.get('label') or ''),
+            'type': str(item.get('type') or 'number'),
+            'default': item.get('default'),
+            'min': item.get('min'),
+            'max': item.get('max'),
+            'step': item.get('step'),
+        })
+
+    data_fields = []
+    for subscription in subscriptions:
+        if not isinstance(subscription, dict):
+            continue
+        for field in subscription.get('fields') or []:
+            field_name = str(field or '').strip()
+            if field_name and field_name not in data_fields:
+                data_fields.append(field_name)
+
+    return {
+        'source': source,
+        'api_version': int(manifest.get('apiVersion') or 2),
+        'strategy_type': str(manifest.get('strategyType') or 'cta'),
+        'primary_frequency': str(manifest.get('primaryFrequency') or ''),
+        'markets': list(manifest.get('markets') or []),
+        'universe_kind': str(universe.get('kind') or 'static'),
+        'universe_reference': str(universe.get('reference') or ''),
+        'instruments': [dict(item) for item in instruments if isinstance(item, dict)],
+        'benchmark': dict(benchmark) if benchmark else None,
+        'leverage_allowed': bool(manifest.get('leverageAllowed') or False),
+        'max_leverage': float(manifest.get('maxLeverage') or 1.0),
+        'warmup_bars': int(manifest.get('warmupBars') or 0),
+        'factor_dependencies': list(manifest.get('factorDependencies') or []),
+        'fundamental_dependencies': list(manifest.get('fundamentalDependencies') or []),
+        'data_fields': data_fields,
+        'parameters': normalized_parameters,
+    }
+
+
 def _marketplace_platform_fee_rate() -> Decimal:
     """Return marketplace platform fee as a 0..1 ratio.
 
@@ -59,57 +118,6 @@ class CommunityService:
     
     def __init__(self):
         self.billing = get_billing_service()
-        # Best-effort: ensure compatibility columns exist (for old databases)
-        try:
-            with get_db_connection() as db:
-                cur = db.cursor()
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS vip_free BOOLEAN DEFAULT FALSE")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS is_encrypted INTEGER DEFAULT 0")
-                # source_indicator_id links a buyer's local copy back to the published
-                # original indicator so we can re-sync the latest code on demand.
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_indicator_id INTEGER")
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_indicator_codes_source "
-                    "ON qd_indicator_codes USING btree (source_indicator_id)"
-                )
-                # Multi-language support: LLM-translated name/description payloads.
-                # source_language stores the original language code (e.g. 'zh-CN') and
-                # *_i18n stores a JSONB dict {"en-US": "...", "zh-CN": "...", ...} that
-                # downstream get_market_indicators / get_indicator_detail will pick
-                # from based on the request's Accept-Language header.
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_language VARCHAR(16)")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS name_i18n JSONB")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS description_i18n JSONB")
-                # Asset taxonomy: indicator | script_template. Legacy rows may
-                # still contain bot_preset and are converted to script sources
-                # when purchased or synced.
-                cur.execute(
-                    "ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) DEFAULT 'indicator'"
-                )
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_script_source_id INTEGER")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_strategy_id INTEGER")
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_script "
-                    "ON qd_indicator_codes USING btree (source_script_source_id)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_strategy "
-                    "ON qd_indicator_codes USING btree (source_strategy_id)"
-                )
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS gross_price DECIMAL(10,2)")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10,2) DEFAULT 0")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS seller_amount DECIMAL(10,2)")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS fee_rate DECIMAL(10,6) DEFAULT 0")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_name_snapshot VARCHAR(255)")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_description_snapshot TEXT")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_code_snapshot TEXT")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_type_snapshot VARCHAR(32)")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_preview_image_snapshot VARCHAR(500)")
-                cur.execute("ALTER TABLE qd_indicator_purchases ADD COLUMN IF NOT EXISTS asset_is_encrypted_snapshot INTEGER DEFAULT 0")
-                db.commit()
-                cur.close()
-        except Exception:
-            pass
     
     # ==========================================
     # ==========================================
@@ -394,7 +402,7 @@ class CommunityService:
         existing_indicator_id: int = 0,
         source_id: int = 0,
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-        """Publish a script strategy's code to the marketplace as script_template."""
+        """Publish Strategy API V2 code to the marketplace as a script template."""
         code = (code or '').strip()
         name = (name or '').strip()
         if not code:
@@ -414,20 +422,6 @@ class CommunityService:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                try:
-                    cur.execute(
-                        "ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) DEFAULT 'indicator'"
-                    )
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS is_encrypted INTEGER DEFAULT 0")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS vip_free BOOLEAN DEFAULT FALSE")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_script_source_id INTEGER")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_strategy_id INTEGER")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_language VARCHAR(16)")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS name_i18n JSONB")
-                    cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS description_i18n JSONB")
-                except Exception:
-                    pass
-
                 if existing_indicator_id and existing_indicator_id > 0:
                     cur.execute(
                         """
@@ -507,14 +501,6 @@ class CommunityService:
             except Exception:
                 pass
         return {}
-
-    def _parse_bot_preset_json(self, raw: Any) -> Dict[str, Any]:
-        data = self._parse_json_dict(raw)
-        if not data:
-            raise ValueError('invalid bot preset payload')
-        if not data.get('bot_type') and isinstance(data.get('trading_config'), dict):
-            data['bot_type'] = data['trading_config'].get('bot_type')
-        return data
 
     def get_indicator_detail(
         self,
@@ -622,33 +608,9 @@ class CommunityService:
                                 )
                             else:
                                 local_copy_missing = True
-                        elif asset_type == 'bot_preset':
-                            source = self._find_buyer_script_source_from_legacy_preset(
-                                cur, buyer_id=user_id, preset_id=indicator_id
-                            )
-                            if source:
-                                purchased_script_source_id = source['id']
-                                cur.execute(
-                                    "SELECT code, is_encrypted FROM qd_indicator_codes WHERE id = ?",
-                                    (indicator_id,)
-                                )
-                                original_row = cur.fetchone()
-                                try:
-                                    preset = self._parse_bot_preset_json(original_row['code'] if original_row else None)
-                                    original_code = preset.get('strategy_code') or ''
-                                except Exception:
-                                    original_code = ''
-                                local_code = source.get('code')
-                                try:
-                                    has_update = (original_code or '') != (local_code or '')
-                                except Exception:
-                                    has_update = False
-                            else:
-                                local_copy_missing = True
                         else:
                             local_copy = self._find_buyer_local_copy(
-                                cur, buyer_id=user_id, indicator_id=indicator_id,
-                                original_name=row['name']
+                                cur, buyer_id=user_id, indicator_id=indicator_id
                             )
                             if local_copy is not None:
                                 local_copy_id = local_copy['id']
@@ -862,19 +824,6 @@ class CommunityService:
                             'is_encrypted': indicator.get('is_encrypted') or 0,
                         },
                     )
-                elif asset_type == 'bot_preset':
-                    from app.services.script_source import get_script_source_service
-                    preset = self._parse_bot_preset_json(indicator['code'])
-                    delivered_source_id = get_script_source_service().create_from_marketplace_asset(
-                        buyer_id,
-                        {
-                            'id': indicator_id,
-                            'name': indicator['name'],
-                            'description': indicator['description'],
-                            'code': preset.get('strategy_code') or '',
-                            'is_encrypted': indicator.get('is_encrypted') or 0,
-                        },
-                    )
                 else:
                     now_ts = int(time.time())
                     # Get vip_free as boolean from indicator
@@ -935,65 +884,26 @@ class CommunityService:
     # Local copy lookup / sync helpers
     # ------------------------------------------------------------------
 
-    def _find_buyer_local_copy(self, cur, buyer_id: int, indicator_id: int, original_name: str = '') -> Optional[Dict[str, Any]]:
-        """Find a buyer's local copy that originated from the given published indicator.
-
-        Strategy:
-          1. Prefer the explicit link via ``source_indicator_id`` (set on new purchases).
-          2. Fall back to matching by ``(user_id, is_buy=1, name)`` for legacy copies
-             created before the ``source_indicator_id`` column existed.
-
-        Returns the row (id/name/code) or None if no candidate can be found.
-        """
-        try:
-            cur.execute(
-                """
-                SELECT id, name, code, is_encrypted
-                FROM qd_indicator_codes
-                WHERE user_id = ? AND source_indicator_id = ?
-                ORDER BY id DESC LIMIT 1
-                """,
-                (buyer_id, indicator_id)
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    'id': row['id'],
-                    'name': row['name'],
-                    'code': row.get('code'),
-                    'is_encrypted': row.get('is_encrypted'),
-                    'matched_by': 'source_id'
-                }
-        except Exception as e:
-            # source_indicator_id column may be missing on very old DBs; ignore and fallback
-            logger.debug(f"source_indicator_id lookup failed (likely legacy DB): {e}")
-
-        if not original_name:
+    def _find_buyer_local_copy(self, cur, buyer_id: int, indicator_id: int) -> Optional[Dict[str, Any]]:
+        """Find a buyer's local copy by its canonical marketplace source ID."""
+        cur.execute(
+            """
+            SELECT id, name, code, is_encrypted
+            FROM qd_indicator_codes
+            WHERE user_id = ? AND source_indicator_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (buyer_id, indicator_id)
+        )
+        row = cur.fetchone()
+        if not row:
             return None
-
-        try:
-            cur.execute(
-                """
-                SELECT id, name, code, is_encrypted
-                FROM qd_indicator_codes
-                WHERE user_id = ? AND is_buy = 1 AND name = ?
-                ORDER BY id DESC LIMIT 1
-                """,
-                (buyer_id, original_name)
-            )
-            row = cur.fetchone()
-            if row:
-                return {
-                    'id': row['id'],
-                    'name': row['name'],
-                    'code': row.get('code'),
-                    'is_encrypted': row.get('is_encrypted'),
-                    'matched_by': 'name'
-                }
-        except Exception as e:
-            logger.debug(f"legacy name-based lookup failed: {e}")
-
-        return None
+        return {
+            'id': row['id'],
+            'name': row['name'],
+            'code': row.get('code'),
+            'is_encrypted': row.get('is_encrypted'),
+        }
 
     def _parse_trading_config_json(self, raw: Any) -> Dict[str, Any]:
         if isinstance(raw, dict):
@@ -1016,26 +926,6 @@ class CommunityService:
                 'name': original['name'],
                 'description': original.get('description') or '',
                 'code': original.get('code') or '',
-                'is_encrypted': original.get('is_encrypted') or 0,
-            },
-        )
-        return {
-            'script_source_id': source_id,
-            'updated': True,
-            'restored': True,
-            'indicator_name': original['name'],
-        }
-
-    def _restore_bot_preset_copy(self, buyer_id: int, original: Dict[str, Any]) -> Dict[str, Any]:
-        from app.services.script_source import get_script_source_service
-        preset = self._parse_bot_preset_json(original.get('code'))
-        source_id = get_script_source_service().create_from_marketplace_asset(
-            buyer_id,
-            {
-                'id': original['id'],
-                'name': original['name'],
-                'description': original.get('description') or '',
-                'code': preset.get('strategy_code') or '',
                 'is_encrypted': original.get('is_encrypted') or 0,
             },
         )
@@ -1094,62 +984,12 @@ class CommunityService:
             'asset_type': (purchase_row.get('asset_type_snapshot') or 'indicator'),
         }
 
-    def _find_buyer_strategy_from_template(
-        self, cur, buyer_id: int, template_id: int
-    ) -> Optional[Dict[str, Any]]:
-        """Locate a script strategy created from a marketplace script_template."""
-        try:
-            cur.execute(
-                """
-                SELECT id, strategy_name, strategy_code, trading_config
-                FROM qd_strategies_trading
-                WHERE user_id = ? AND strategy_mode = 'script'
-                ORDER BY id DESC
-                """,
-                (int(buyer_id),),
-            )
-            rows = cur.fetchall() or []
-        except Exception:
-            return None
-        tid = str(int(template_id))
-        for row in rows:
-            tc = self._parse_trading_config_json(row.get('trading_config'))
-            if str(tc.get('source_template_id') or '') == tid:
-                return {
-                    'id': row['id'],
-                    'strategy_name': row.get('strategy_name'),
-                    'strategy_code': row.get('strategy_code'),
-                }
-        return None
-
-    def _find_buyer_script_source_from_legacy_preset(
-        self, cur, buyer_id: int, preset_id: int
-    ) -> Optional[Dict[str, Any]]:
-        """Locate a script source delivered from a legacy bot_preset asset."""
-        try:
-            cur.execute(
-                """
-                SELECT id, code, metadata
-                FROM qd_script_sources
-                WHERE user_id = ? AND source_marketplace_indicator_id = ?
-                ORDER BY id DESC LIMIT 1
-                """,
-                (int(buyer_id), int(preset_id)),
-            )
-            row = cur.fetchone()
-        except Exception:
-            return None
-        if not row:
-            return None
-        return {'id': row['id'], 'code': row.get('code'), 'metadata': row.get('metadata')}
-
     def sync_purchased_indicator(self, buyer_id: int, indicator_id: int) -> Tuple[bool, str, Dict[str, Any]]:
         """Refresh a buyer's local copy with the publisher's latest code/description.
 
         The user must have already purchased ``indicator_id`` for this to succeed.
-        The buyer's local copy (matched by ``source_indicator_id``, or by name for
-        legacy copies) will be overwritten with the publisher's current content,
-        and its ``source_indicator_id`` will be repaired if it was missing.
+        The buyer's local copy, linked by ``source_indicator_id``, will be
+        overwritten with the publisher's current content.
 
         If the original indicator has been unpublished/removed or the buyer's
         local copy no longer exists (e.g. user deleted it), a recoverable error
@@ -1195,7 +1035,7 @@ class CommunityService:
                         cur.close()
                         return False, 'indicator_not_found', {}
                     asset_type = str(snapshot.get('asset_type') or 'indicator').strip().lower()
-                    if asset_type in ('script_template', 'bot_preset'):
+                    if asset_type == 'script_template':
                         cur.execute(
                             """
                             SELECT id
@@ -1212,12 +1052,11 @@ class CommunityService:
                                 'script_source_id': local_source['id'],
                                 'updated': False,
                             }
-                        data = self._restore_bot_preset_copy(buyer_id, snapshot) if asset_type == 'bot_preset' else self._restore_script_template_copy(buyer_id, snapshot)
+                        data = self._restore_script_template_copy(buyer_id, snapshot)
                         cur.close()
                         return True, 'restored', data
                     local = self._find_buyer_local_copy(
-                        cur, buyer_id=buyer_id, indicator_id=indicator_id,
-                        original_name=snapshot.get('name') or ''
+                        cur, buyer_id=buyer_id, indicator_id=indicator_id
                     )
                     if local:
                         cur.close()
@@ -1232,7 +1071,7 @@ class CommunityService:
                 if not original.get('publish_to_community'):
                     snapshot = self._asset_from_purchase_snapshot(indicator_id, purchase_row)
                     asset_type = str((snapshot or original).get('asset_type') or 'indicator').strip().lower()
-                    if asset_type in ('script_template', 'bot_preset'):
+                    if asset_type == 'script_template':
                         cur.execute(
                             """
                             SELECT id
@@ -1250,13 +1089,12 @@ class CommunityService:
                                 'updated': False,
                             }
                         if snapshot:
-                            data = self._restore_bot_preset_copy(buyer_id, snapshot) if asset_type == 'bot_preset' else self._restore_script_template_copy(buyer_id, snapshot)
+                            data = self._restore_script_template_copy(buyer_id, snapshot)
                             cur.close()
                             return True, 'restored', data
                     else:
                         local = self._find_buyer_local_copy(
-                            cur, buyer_id=buyer_id, indicator_id=indicator_id,
-                            original_name=(snapshot or original).get('name') or ''
+                            cur, buyer_id=buyer_id, indicator_id=indicator_id
                         )
                         if local:
                             cur.close()
@@ -1334,60 +1172,9 @@ class CommunityService:
                         'indicator_name': original['name'],
                     }
 
-                if asset_type == 'bot_preset':
-                    local_source = self._find_buyer_script_source_from_legacy_preset(
-                        cur, buyer_id=buyer_id, preset_id=indicator_id
-                    )
-                    if not local_source:
-                        data = self._restore_bot_preset_copy(buyer_id, original)
-                        cur.close()
-                        return True, 'restored', data
-                    try:
-                        preset = self._parse_bot_preset_json(original.get('code'))
-                    except Exception:
-                        cur.close()
-                        return False, 'invalid_preset_payload', {}
-                    new_code = preset.get('strategy_code') or ''
-                    metadata = self._parse_trading_config_json(local_source.get('metadata'))
-                    original_hidden = bool(original.get('is_encrypted') or 0)
-                    local_hidden = bool(metadata.get('code_hidden') or metadata.get('hide_code') or False)
-                    if (local_source.get('code') or '') == new_code and local_hidden == original_hidden:
-                        cur.close()
-                        return True, 'already_latest', {
-                            'script_source_id': local_source['id'],
-                            'updated': False,
-                        }
-                    metadata['code_hidden'] = original_hidden
-                    metadata['from_marketplace'] = True
-                    metadata['asset_type'] = 'script_template'
-                    metadata['legacy_asset_type'] = 'bot_preset'
-                    cur.execute(
-                        """
-                        UPDATE qd_script_sources
-                        SET code = ?, name = ?, description = ?, metadata = ?::jsonb, updated_at = NOW()
-                        WHERE id = ? AND user_id = ?
-                        """,
-                        (
-                            new_code,
-                            original['name'],
-                            original.get('description') or '',
-                            json.dumps(metadata, ensure_ascii=False),
-                            local_source['id'],
-                            buyer_id,
-                        ),
-                    )
-                    db.commit()
-                    cur.close()
-                    return True, 'success', {
-                        'script_source_id': local_source['id'],
-                        'updated': True,
-                        'indicator_name': original['name'],
-                    }
-
                 # 3. Locate buyer's local copy (indicator assets)
                 local = self._find_buyer_local_copy(
-                    cur, buyer_id=buyer_id, indicator_id=indicator_id,
-                    original_name=original['name']
+                    cur, buyer_id=buyer_id, indicator_id=indicator_id
                 )
                 if not local:
                     data = self._restore_indicator_copy(cur, buyer_id, original)
@@ -1397,14 +1184,6 @@ class CommunityService:
 
                 # 4. Short-circuit when already identical
                 if (local.get('code') or '') == (original.get('code') or ''):
-                    # Still repair source_indicator_id on legacy rows so future
-                    # syncs take the fast path and "has_update" detection is accurate.
-                    if local.get('matched_by') == 'name':
-                        cur.execute(
-                            "UPDATE qd_indicator_codes SET source_indicator_id = ? WHERE id = ?",
-                            (indicator_id, local['id'])
-                        )
-                        db.commit()
                     cur.close()
                     return True, 'already_latest', {
                         'local_copy_id': local['id'],
@@ -1414,8 +1193,7 @@ class CommunityService:
                 # 5. Overwrite the local copy with the latest publisher content
                 now_ts = int(time.time())
                 try:
-                    from app.services.indicator_versions import ensure_indicator_version_schema, insert_indicator_version
-                    ensure_indicator_version_schema(cur)
+                    from app.services.indicator_versions import insert_indicator_version
                     insert_indicator_version(
                         cur,
                         int(local['id']),
@@ -1466,7 +1244,7 @@ class CommunityService:
 
                 logger.info(
                     f"User {buyer_id} synced local indicator {local['id']} "
-                    f"from published indicator {indicator_id} (matched_by={local.get('matched_by')})"
+                    f"from published indicator {indicator_id}"
                 )
                 return True, 'success', {
                     'local_copy_id': local['id'],
@@ -1542,17 +1320,9 @@ class CommunityService:
                         if source:
                             purchased_script_source_id = source['id']
                             local_copy_exists = True
-                    elif asset_type == 'bot_preset' and marketplace_id:
-                        source = self._find_buyer_script_source_from_legacy_preset(
-                            cur, buyer_id=user_id, preset_id=marketplace_id
-                        )
-                        if source:
-                            purchased_script_source_id = source['id']
-                            local_copy_exists = True
                     elif marketplace_id:
                         local = self._find_buyer_local_copy(
-                            cur, buyer_id=user_id, indicator_id=marketplace_id,
-                            original_name=row.get('name') or ''
+                            cur, buyer_id=user_id, indicator_id=marketplace_id
                         )
                         if local:
                             local_copy_id = local['id']
@@ -2417,6 +2187,7 @@ class CommunityService:
             'best_run_id': None,
             'best_run_meta': None,
             'equity_curve': [],
+            'strategy_contract': None,
         }
 
         try:
@@ -2426,12 +2197,15 @@ class CommunityService:
                 cur.execute(
                     """
                     SELECT
-                        id,
-                        COALESCE(asset_type, 'indicator') as asset_type,
-                        source_script_source_id,
-                        source_strategy_id
-                    FROM qd_indicator_codes
-                    WHERE id = %s
+                        i.id,
+                        COALESCE(i.asset_type, 'indicator') as asset_type,
+                        i.source_script_source_id,
+                        i.source_strategy_id,
+                        i.code,
+                        ss.param_schema
+                    FROM qd_indicator_codes i
+                    LEFT JOIN qd_script_sources ss ON ss.id = i.source_script_source_id
+                    WHERE i.id = %s
                     """,
                     (indicator_id,),
                 )
@@ -2447,7 +2221,7 @@ class CommunityService:
                 if kpi['best_run_id']:
                     cur.execute("""
                         SELECT id, symbol, timeframe, start_date, end_date,
-                               leverage, config_snapshot, result_json
+                               leverage, market_type, manifest_json, result_json
                         FROM qd_backtest_runs
                         WHERE id = %s
                     """, (kpi['best_run_id'],))
@@ -2460,15 +2234,13 @@ class CommunityService:
                 # NB: schema columns are ``start_date`` / ``end_date``
                 # (VARCHAR(20) yyyy-mm-dd), not ``started_at``/``ended_at``.
                 best_run_meta = None
+                best_run_manifest = {}
                 if kpi['best_run_id']:
                     best_row = next((r for r in bt_rows if int(r.get('id') or 0) == kpi['best_run_id']), None)
                     if best_row:
                         rj = parse_backtest_result(best_row.get('result_json')) or {}
-                        config_snapshot = self._parse_json_dict(best_row.get('config_snapshot'))
-                        market_config = config_snapshot.get('marketConfig') if isinstance(config_snapshot.get('marketConfig'), dict) else {}
-                        market_type = str(market_config.get('marketType') or market_config.get('market_type') or '').strip().lower()
-                        if market_type in ('futures', 'future', 'perp', 'perpetual'):
-                            market_type = 'swap'
+                        best_run_manifest = self._parse_json_dict(best_row.get('manifest_json'))
+                        market_type = str(best_row.get('market_type') or '').strip().lower()
                         leverage = int(best_row.get('leverage') or 1)
                         if market_type not in ('spot', 'swap'):
                             market_type = 'swap' if leverage > 1 else 'spot'
@@ -2497,6 +2269,32 @@ class CommunityService:
                             'start_date': start_date,
                             'end_date': end_date,
                         }
+
+                strategy_contract = None
+                if str(asset_row.get('asset_type') or '').strip().lower() in {
+                    'script_template', 'script', 'strategy'
+                }:
+                    contract_manifest = {}
+                    contract_source = 'published_code'
+                    try:
+                        from app.services.strategy_v2 import compile_strategy_v2
+
+                        contract_manifest = compile_strategy_v2(
+                            str(asset_row.get('code') or '')
+                        ).manifest.metadata()
+                    except Exception:
+                        logger.debug(
+                            "Marketplace strategy contract compilation failed for asset %s",
+                            indicator_id,
+                            exc_info=True,
+                        )
+                        contract_manifest = best_run_manifest
+                        contract_source = 'backtest_snapshot'
+                    strategy_contract = _strategy_contract_payload(
+                        contract_manifest,
+                        self._parse_json_dict(asset_row.get('param_schema')),
+                        source=contract_source,
+                    )
 
                 # Equity curve for the best run. Pulled from
                 # qd_backtest_equity_points (one row per sample point) so
@@ -2547,11 +2345,16 @@ class CommunityService:
                     combined_win_rate = kpi['win_rate']
                     combined_profit = kpi['total_return']
 
-                if total_strategy_count == 0 and total_trade_count == 0 and not equity_curve:
+                if (
+                    total_strategy_count == 0
+                    and total_trade_count == 0
+                    and not equity_curve
+                    and not strategy_contract
+                ):
                     return default_result
 
                 return {
-                    # Backwards-compatible headline fields
+                    # Summary headline fields
                     'strategy_count': total_strategy_count,
                     'trade_count': total_trade_count,
                     'win_rate': combined_win_rate,
@@ -2578,6 +2381,7 @@ class CommunityService:
                     'best_run_id': kpi['best_run_id'],
                     'best_run_meta': best_run_meta,
                     'equity_curve': equity_curve,
+                    'strategy_contract': strategy_contract,
                 }
 
         except Exception as e:

@@ -1,247 +1,374 @@
 # QuantDinger 指标开发指南
 
-本文是当前版本 QuantDinger 的指标开发契约。请把它当作指标作者、AI 生成器和代码审查的共同标准。
+> 适用范围：当前 QuantDinger 图表指标契约
+> 面向读者：第一次编写指标的用户、从 Pine/通达信公式迁移的开发者，以及需要审查 AI 生成代码的维护者
 
-核心边界只有一句话：**指标只负责看图，不负责交易。**
+QuantDinger 指标是运行在指标编辑器中的 Python 图表程序。它读取当前图表的 K 线数据，计算序列，并通过 <code>output</code> 返回曲线、标记和稀疏图层。
 
-指标代码用于在 K 线图上绘制曲线、灯带、标记、区域、通道和说明。它不能下单，不能回测，不能实盘，不能声明仓位、杠杆、止盈止损或交易方向。需要交易执行时，请把指标通过“AI 指标转策略”转换为 ScriptStrategy，再在策略页和回测中心验证。
+最重要的边界是：**指标只负责看图，不负责交易执行。**
 
-旧文档里出现过的 `IndicatorStrategy`、`# @strategy`、`signal_form`、`exit_owner`、`open_long`、`close_long`、`df["buy"]`、`df["sell"]` 等“指标即策略”写法已经不再是当前指标契约。
+指标不能下单、回测、运行实盘、读取账户、管理仓位、设置杠杆或执行止盈止损。需要交易时，应先把指标中的视觉信号转换成 Strategy API V2 策略，再在策略页完成验证、回测和部署。
 
 ---
 
-## 1. 指标和策略的边界
+## 1. 先完成一个最小指标
 
-| 类型 | 负责什么 | 不负责什么 |
+把下面代码粘贴到指标编辑器并运行：
+
+~~~python
+my_indicator_name = "Close Line"
+my_indicator_description = "Displays the close price as a chart overlay."
+
+df = df.copy()
+
+close_line = [
+    None if pd.isna(value) else float(value)
+    for value in df["close"]
+]
+
+output = {
+    "name": my_indicator_name,
+    "plots": [
+        {
+            "name": "Close",
+            "data": close_line,
+            "color": "#3B82F6",
+            "type": "line",
+            "overlay": True,
+        }
+    ],
+    "signals": [],
+    "layers": [],
+}
+~~~
+
+这个例子展示了完整的最小契约：
+
+1. 声明名称和描述。
+2. 用 <code>df = df.copy()</code> 创建工作副本。
+3. 计算与 K 线等长的数据。
+4. 设置 <code>output</code> 字典。
+
+建议新指标按“先画一条线，再加参数，再加事件标记，最后才加复杂图层”的顺序开发。
+
+---
+
+## 2. 指标、策略和转换流程的边界
+
+| 产物 | 负责内容 | 不负责内容 |
 | --- | --- | --- |
-| Chart Indicator | 图表展示、参数调节、视觉信号、辅助分析 | 回测、实盘、下单、仓位、杠杆、风控 |
-| ScriptStrategy | 回测、实盘、订单意图、仓位状态、风控、日志 | 指标页的 `output` 图表渲染 |
-| Indicator-to-Strategy | 把指标视觉信号翻译成可执行策略 | 在指标代码里直接混入交易执行 |
+| Chart Indicator | 曲线、副图、灯带、视觉标记、区域、标签 | 回测、实盘、订单、仓位、杠杆、交易风控 |
+| Strategy API V2 | 数据订阅、交易信号、订单意图、仓位、回测、实盘、保护规则 | 指标页的 <code>output</code> 图表渲染 |
+| Indicator-to-Strategy | 把视觉信号的真实含义翻译成可执行策略 | 在原指标中混入下单逻辑 |
 
-指标中的 `output["signals"]` 只是图上的标记。比如一个 `sell` 或 `Death` 标记，默认意思是“视觉上的空头/离场提示”，不是自动开空，也不是反手。
+<code>output["signals"]</code> 只是图上的事件标记。例如 <code>sell</code> 类型的 “Death” 标记可以表示多头离场提醒，也可以表示行情转弱；它不会自动开空，更不会自动反手。
 
-如果把一个 long-only 指标转换为策略：
+将只做多指标转换成策略时，通常采用：
 
-- `buy` / `Golden` / `Bullish` 通常映射为 `open_long`
-- `sell` / `Death` / `Bearish exit` 通常映射为 `close_long`
-- 只有用户明确要求双向、做空或反转时，才生成 `open_short`
+- 明确的看多入场事件 → <code>open_long</code>
+- 明确的看空离场事件 → <code>close_long</code>
+- 只有用户明确要求做空，并提供独立的看空入场规则时，才生成 <code>open_short</code>
+
+不要在指标里创建 <code>open_long</code>、<code>close_long</code>、<code>open_short</code>、<code>close_short</code>、<code>add_long</code> 或 <code>reduce_long</code> 等执行列，也不要使用旧式 <code># @strategy</code> 注解。
 
 ---
 
-## 2. 运行环境
+## 3. 运行环境与输入数据
 
-指标运行时提供：
+运行时预置：
 
-- `df`：当前图表 K 线数据，按时间从旧到新排列。
-- `params`：由 `# @param` 声明并由参数面板传入的字典。
-- `pd` / `np`：已预置的 pandas / numpy。
+- <code>df</code>：当前图表的 pandas DataFrame，按时间从旧到新排列，每行对应一根 K 线。
+- <code>params</code>：由参数声明和参数面板合并得到的字典。
+- <code>pd</code>：预置的 pandas。
+- <code>np</code>：预置的 numpy。
+- <code>open</code>、<code>high</code>、<code>low</code>、<code>close</code>、<code>volume</code>：部分运行入口还提供同名便捷 Series；为了可读性和可移植性，教程建议优先使用 <code>df["close"]</code>。
 
-常见字段：
+标准 OHLCV 字段：
 
-```python
-open_ = df["open"]
+~~~python
+open_price = df["open"]
 high = df["high"]
 low = df["low"]
 close = df["close"]
 volume = df["volume"]
-```
+~~~
 
-第一条可变操作必须是：
+注意：
 
-```python
+- 不要假设一定存在 <code>time</code> 列，时间也可能已经在 DataFrame 索引中。
+- 不要重命名或删除 OHLCV 列。
+- 可选字段必须先检查，例如 <code>if "turnover" in df.columns:</code>。
+- 修改 DataFrame 前先执行 <code>df = df.copy()</code>。
+- 核心序列计算优先使用 <code>rolling</code>、<code>ewm</code>、<code>shift</code>、<code>where</code> 等向量化操作。
+
+---
+
+## 4. 文件结构与元数据
+
+推荐结构：
+
+~~~python
+# @param period int 20 Calculation period
+
+my_indicator_name = "Example Indicator"
+my_indicator_description = "Explains what is drawn and how events are marked."
+
 df = df.copy()
-```
 
-不要假设一定有 `time` 字段，也不要假设字段类型永远一致。需要使用可选字段时，先判断是否存在。
+period = int(params.get("period", 20))
 
----
+# Helper functions
+# Series calculation
+# Marker construction
 
-## 3. 安全限制
-
-指标代码运行在沙盒里。禁止：
-
-- 网络请求、文件读写、数据库访问、子进程。
-- `eval`、`exec`、`compile`、`open`、`__import__`。
-- `globals`、`vars`、`dir`、dunder 绕过、元编程逃逸。
-- `getattr` / `setattr` / `delattr` 访问不可信名称。
-- 导入 `os`、`sys`、`requests`、`socket`、`subprocess`、`threading`、`sqlite3`、`multiprocessing`、`pathlib`、`tempfile`、`glob`、`io`、`pickle`、`ctypes`、`operator` 等模块。
-
-通常不需要写 `import pandas` 或 `import numpy`，因为 `pd` 和 `np` 已经存在。
-
----
-
-## 4. 必需元数据
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "layers": [],
+}
+~~~
 
 每个指标都应声明：
 
-```python
+~~~python
 my_indicator_name = "Dual EMA Viewer"
 my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
-```
+~~~
 
-这些字段会用于指标列表、保存记录、市场展示和 AI 转策略上下文。描述应说明它画什么、标记什么、有哪些关键参数；不要写交易承诺或收益描述。
+名称应简短稳定；描述应说明：
+
+- 计算了什么；
+- 在主图还是副图显示；
+- 标记代表什么事件；
+- 有哪些重要参数。
+
+不要在描述中承诺收益或暗示已通过实盘验证。
+
+根据项目源码规则，代码标识符、元数据、注释、参数描述和默认显示标签使用英文。中文可以用于本教程正文；只有用户明确要求本地化显示标签时，指标中的展示文本才使用指定语言。
 
 ---
 
-## 5. 参数声明
+## 5. 参数声明与参数面板
 
-使用 `# @param` 声明参数：
+语法：
 
-```python
+~~~python
+# @param <name> <int|float|bool|str> <default> <description>
+~~~
+
+示例：
+
+~~~python
 # @param fast_len int 12 Fast EMA period
 # @param slow_len int 26 Slow EMA period
-# @param show_marks bool true Show crossover markers
 # @param band_pct float 1.5 Channel width percent
-```
+# @param show_marks bool true Show crossover markers
+# @param source str close Price source
+~~~
 
-然后在代码里显式读取：
+声明不会自动创建 Python 变量，必须显式读取：
 
-```python
+~~~python
 fast_len = int(params.get("fast_len", 12))
 slow_len = int(params.get("slow_len", 26))
-show_marks = bool(params.get("show_marks", True))
 band_pct = float(params.get("band_pct", 1.5))
-```
+show_marks = bool(params.get("show_marks", True))
+source = str(params.get("source", "close"))
+~~~
 
-规则：
+硬性规则：
 
-- `# @param` 的默认值必须和 `params.get(..., default)` 的默认值一致。
-- 参数只控制指标计算和图表展示。
-- 不要声明 `direction`、`market_type`、`investment_amount`、`leverage`、`stop_loss`、`take_profit`、`position_size` 等交易配置。
-- 布尔默认值在注释里可写 `true` / `false`，Python 里使用 `True` / `False`。
+- 每行只声明一个参数。
+- 参数名使用合法 Python 标识符。
+- 类型只使用 <code>int</code>、<code>float</code>、<code>bool</code>、<code>str</code> 或 <code>string</code>。
+- 注释中的默认值必须和 <code>params.get</code> 的回退值一致。
+- 布尔值在声明中写 <code>true</code>/<code>false</code>，Python 中写 <code>True</code>/<code>False</code>。
+- 字符串默认值不能包含空格，因为解析器把默认值读取为一个 token。
+
+参数搜索可在描述末尾声明候选范围：
+
+~~~python
+# @param period int 20 Lookback period range=5:60:5
+# @param multiplier float 2.0 Band multiplier values=1.5,2.0,2.5,3.0
+~~~
+
+<code>range=start:end:step</code> 是包含终点的等差候选序列；<code>values=a,b,c</code> 是显式候选列表。单个参数最多展开 1024 个候选值。描述中的范围标记会从用户可见描述中移除。
+
+指标参数只控制计算和显示。不要声明账户、标的、周期、仓位、杠杆、止损或止盈等执行参数。
 
 ---
 
-## 6. 输出结构
+## 6. output 输出契约
 
-指标必须设置 `output` 字典：
+指标运行结束时必须设置字典类型的 <code>output</code>：
 
-```python
+~~~python
 output = {
     "name": my_indicator_name,
     "plots": plots,
     "signals": signals,
     "layers": layers,
 }
-```
+~~~
 
 可选字段：
 
-```python
+~~~python
 output["calculatedVars"] = {}
-```
+~~~
 
-长度规则非常重要：
+验证要求：
 
-- 每个 `plot["data"]` 的长度必须等于 `len(df)`。
-- 每个 `signal["data"]` 的长度必须等于 `len(df)`。
-- `layers` 不需要逐 bar 数组，但索引、时间和价格必须在当前数据范围内有意义。
+- <code>output</code> 必须是字典。
+- <code>plots</code> 或 <code>signals</code> 至少有一个键存在。
+- 每个 <code>plot["data"]</code> 的长度必须等于 <code>len(df)</code>。
+- 每个 <code>signal["data"]</code> 的长度必须等于 <code>len(df)</code>。
+- 序列中不要输出 NaN、正无穷或负无穷；缺失点使用 <code>None</code>。
+- <code>layers</code> 不需要逐 bar 数组，但索引、时间和价格必须落在当前数据的有效语义范围内。
+
+推荐总是显式提供空列表，这样结构最清晰：
+
+~~~python
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "layers": [],
+}
+~~~
 
 ---
 
-## 7. plots：连续视觉序列
+## 7. plots：主图曲线与副图序列
 
-`plots` 用于曲线、柱状图、灯带、振荡器等连续或半连续序列。
+每个 plot 至少包含：
 
-```python
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| <code>name</code> | str | 图例和序列名称 |
+| <code>data</code> | list | 与 <code>df</code> 等长的数值/<code>None</code> 列表 |
+| <code>color</code> | str | 推荐使用 <code>#RRGGBB</code> |
+| <code>overlay</code> | bool | <code>True</code> 主图，<code>False</code> 副图 |
+| <code>type</code> | str，可选 | 常用 <code>line</code>，也可由当前渲染器支持其他样式 |
+
+示例：
+
+~~~python
 plots = [
     {
         "name": "EMA Fast",
-        "data": ema_fast_values,
-        "color": "#22c55e",
+        "data": fast_values,
+        "color": "#22C55E",
         "type": "line",
         "overlay": True,
     },
     {
         "name": "RSI",
         "data": rsi_values,
-        "color": "#3b82f6",
+        "color": "#8B5CF6",
         "type": "line",
         "overlay": False,
     },
 ]
-```
+~~~
 
-字段：
+价格均线、布林带和通道通常使用主图；RSI、MACD 和状态灯带通常使用副图。
 
-| 字段 | 说明 |
-| --- | --- |
-| `name` | 图例和左侧标签名称 |
-| `data` | 与 `df` 等长的数组 |
-| `color` | 推荐 `#RRGGBB` |
-| `type` | 可选，常见为 `line`、`bar`、`lamp` |
-| `overlay` | `True` 画在主图，`False` 画在副图 |
+统一处理空值：
 
-价格均线、布林带、通道线通常 `overlay=True`。RSI、MACD 柱、灯带通常 `overlay=False`。
-
-处理空值建议：
-
-```python
+~~~python
 def to_plot_list(series):
-    return [None if pd.isna(v) else float(v) for v in series]
-```
+    return [
+        None if pd.isna(value) else float(value)
+        for value in series
+    ]
+~~~
 
-不要把价格叠加线的 warm-up 空值硬填成 `0`，否则图表会出现误导性的零线。
+不要把价格叠加线的预热空值填成 0，否则图上会出现从零点拉到真实价格的误导性线段。
 
 ---
 
-## 8. signals：视觉事件标记
+## 8. signals：稀疏视觉事件
 
-`signals` 只用于图表标记：
+signal 示例：
 
-```python
+~~~python
 signals = [
-    {"type": "buy", "text": "Golden", "color": "#22c55e", "data": buy_marks},
-    {"type": "sell", "text": "Death", "color": "#ef4444", "data": sell_marks},
+    {
+        "type": "buy",
+        "text": "Long Entry",
+        "color": "#22C55E",
+        "data": entry_marks,
+    },
+    {
+        "type": "sell",
+        "text": "Long Exit",
+        "color": "#EF4444",
+        "data": exit_marks,
+    },
 ]
-```
+~~~
 
 规则：
 
-- `type` 只能表达视觉方向，常用 `buy` / `sell`。
-- `data` 是与 `df` 等长的数组，空位置为 `None`，有标记的位置为价格。
-- 默认标记一次性事件，不标记持续状态。
-- 持续状态应使用 `plots`、灯带或 `layers` 表达。
+- <code>type</code> 通常为 <code>buy</code> 或 <code>sell</code>，只控制标记方向，不是信号名称。
+- <code>text</code> 是稳定的信号名；可选 <code>textData</code> 可为每根 bar 提供不同标签。
+- 只有 <code>data[i]</code> 中的有限数值会激活第 i 根 bar 的信号。
+- <code>text</code> 或 <code>textData</code> 本身不会激活信号。
+- 无信号位置必须使用真实的 <code>None</code>。
+- 默认标记一次性事件，不要在条件持续为真时每根 bar 都重复标记。
 
-推荐事件函数：
+把状态转换成边沿事件：
 
-```python
+~~~python
 def edge(condition):
-    s = condition.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
-```
+    current = condition.fillna(False).astype(bool)
+    previous = current.shift(1, fill_value=False).astype(bool)
+    return current & ~previous
+~~~
 
-生成 marker：
+生成价格标记：
 
-```python
-buy_signal = edge(ema_fast > ema_slow)
-sell_signal = edge(ema_fast < ema_slow)
+~~~python
+entry_event = edge(ema_fast > ema_slow)
+exit_event = edge(ema_fast < ema_slow)
 
-buy_marks = [
-    float(df["low"].iloc[i] * 0.995) if bool(buy_signal.iloc[i]) else None
+entry_marks = [
+    float(df["low"].iloc[i] * 0.995)
+    if bool(entry_event.iloc[i])
+    else None
     for i in range(len(df))
 ]
-sell_marks = [
-    float(df["high"].iloc[i] * 1.005) if bool(sell_signal.iloc[i]) else None
+
+exit_marks = [
+    float(df["high"].iloc[i] * 1.005)
+    if bool(exit_event.iloc[i])
+    else None
     for i in range(len(df))
 ]
-```
+~~~
 
-如果用户要求“确认后下一根显示”，可以整体右移：
+如果要求“确认后下一根显示”：
 
-```python
-confirmed_buy = edge(raw_buy).shift(1).fillna(False).astype(bool)
-```
+~~~python
+confirmed_entry = edge(raw_entry).shift(
+    1,
+    fill_value=False,
+).astype(bool)
+~~~
+
+这只是把已确认事件向后移动一根，并没有读取未来数据。
 
 ---
 
-## 9. layers：稀疏图层
+## 9. layers：区域、线段和标签
 
-`layers` 用于区域、线段、标签等辅助分析图层。不要默认添加大量图层，只有用户明确要求供需区、支撑阻力、通道、失效区域、溢价/折价区时才使用。
+普通指标优先使用 plots 和 signals。只有在供需区、支撑阻力、通道、失效位或结构标签确实能提高可读性时才使用 layers。
 
 区域：
 
-```python
+~~~python
 {
     "type": "zone",
     "startIndex": 120,
@@ -249,124 +376,160 @@ confirmed_buy = edge(raw_buy).shift(1).fillna(False).astype(bool)
     "top": 105.2,
     "bottom": 101.8,
     "text": "Demand",
-    "fillColor": "#22c55e",
-    "borderColor": "#22c55e",
+    "fillColor": "#22C55E",
+    "borderColor": "#22C55E",
     "opacity": 0.12,
 }
-```
+~~~
 
 水平线：
 
-```python
+~~~python
 {
     "type": "line",
     "startIndex": 100,
     "endIndex": len(df) - 1,
     "price": 98.5,
     "text": "Support",
-    "color": "#f59e0b",
+    "color": "#F59E0B",
     "dashed": True,
 }
-```
+~~~
 
-标签：
+斜线把 <code>price</code> 换成 <code>startPrice</code> 和 <code>endPrice</code>。标签：
 
-```python
+~~~python
 {
     "type": "label",
     "index": len(df) - 1,
     "price": float(df["close"].iloc[-1]),
-    "text": "Trend weakens",
-    "color": "#ef4444",
-    "textColor": "#ffffff",
+    "text": "Trend Weakens",
+    "color": "#EF4444",
+    "textColor": "#FFFFFF",
 }
-```
+~~~
 
-图层不要模拟订单，不要表达真实止盈止损或仓位。
+索引写法对当前 <code>df</code> 最稳定。也支持与 K 线时间戳匹配的 <code>startTime</code>、<code>endTime</code> 和 <code>time</code>。
 
----
-
-## 10. pandas / numpy 类型陷阱
-
-AI 和手写代码最常见的错误是把 numpy 数组当 pandas Series 用。
-
-危险写法：
-
-```python
-x = np.where(close > close.shift(1), close, 0)
-ma = x.rolling(10).mean()
-```
-
-`np.where` 可能返回 ndarray，ndarray 没有 `.rolling()`。
-
-正确写法：
-
-```python
-x = close.where(close > close.shift(1), 0)
-ma = x.rolling(10).mean()
-```
-
-如果必须包装 ndarray：
-
-```python
-arr = np.where(close > close.shift(1), close, 0)
-x = pd.Series(arr, index=df.index)
-```
-
-必须传 `index=df.index`，否则在 DatetimeIndex 下会静默错位。
+图层仍然只是视觉对象，不能表示真实订单、仓位或已托管止损。
 
 ---
 
-## 11. 禁止的旧策略字段
+## 10. pandas 与 numpy 类型陷阱
 
-指标代码中不要出现：
+最常见的错误是把 numpy ndarray 当成 pandas Series。
 
-```python
-# @strategy stopLossPct 0.02
-# signal_form: four_way
-# exit_owner: engine
-# flip_mode: R2
+错误：
 
-df["buy"] = ...
-df["sell"] = ...
-df["open_long"] = ...
-df["close_long"] = ...
-df["open_short"] = ...
-df["close_short"] = ...
-df["add_long"] = ...
-df["reduce_long"] = ...
-```
+~~~python
+values = np.where(close > close.shift(1), close, 0)
+average = values.rolling(10).mean()
+~~~
 
-这些字段不会让指标下单。它们只会误导用户和 AI。需要执行时请生成 ScriptStrategy。
+<code>np.where</code> 可能返回 ndarray，而 ndarray 没有 <code>rolling</code>、<code>shift</code>、<code>ewm</code>、<code>fillna</code> 或 <code>iloc</code>。
+
+优先使用 pandas 原生写法：
+
+~~~python
+values = close.where(close > close.shift(1), 0)
+average = values.rolling(10).mean()
+~~~
+
+必须包装 ndarray 时：
+
+~~~python
+array = np.where(close > close.shift(1), close, 0)
+values = pd.Series(array, index=df.index)
+~~~
+
+一定传入 <code>index=df.index</code>。否则新 Series 使用 RangeIndex，与 DatetimeIndex 数据做运算时会静默错位。
+
+常用替换：
+
+| numpy 写法 | pandas 优先写法 |
+| --- | --- |
+| <code>np.where(cond, a, b)</code> | <code>a.where(cond, b)</code> |
+| <code>np.maximum(s, 0)</code> | <code>s.clip(lower=0)</code> |
+| <code>np.minimum(s, k)</code> | <code>s.clip(upper=k)</code> |
+| <code>np.abs(s)</code> | <code>s.abs()</code> |
 
 ---
 
-## 12. 完整示例：双 EMA 图表指标
+## 11. 避免未来数据和重绘
 
-```python
-# @param fast_len int 12 Fast EMA period
-# @param slow_len int 26 Slow EMA period
+指标只能使用当前及历史 bar。禁止：
+
+- <code>shift(-1)</code>、<code>shift(-N)</code>；
+- 循环中的 <code>iloc[i + 1]</code>；
+- <code>bars_ago(-N)</code>；
+- <code>rolling(..., center=True)</code>；
+- 用完整数据集最后一行反向修改历史信号；
+- 任何利用未来最高价、最低价或未来确认结果标记过去 bar 的写法。
+
+合法确认通常使用当前条件与上一根状态：
+
+~~~python
+cross_up = (
+    (ema_fast > ema_slow)
+    & (ema_fast.shift(1) <= ema_slow.shift(1))
+)
+~~~
+
+如果信号必须等当前 bar 收盘才能确定，转换成策略后应在下一根 bar 执行，不要为了让图形更漂亮而把信号提前。
+
+---
+
+## 12. 沙箱与安全限制
+
+允许的计算模块包括 numpy、pandas、math、json、datetime、time、collections、functools、itertools、statistics、decimal、fractions 和 copy。<code>pd</code> 与 <code>np</code> 已预置，通常无需 import。
+
+禁止：
+
+- 网络、文件、数据库和子进程访问；
+- <code>eval</code>、<code>exec</code>、<code>compile</code>、<code>open</code>；
+- 反射、动态导入、dunder 逃逸和沙箱绕过；
+- pandas/numpy 的文件读取、写入和序列化方法；
+- <code>os</code>、<code>sys</code>、<code>requests</code>、<code>socket</code>、<code>subprocess</code>、<code>threading</code>、<code>sqlite3</code>、<code>pathlib</code>、<code>pickle</code>、<code>ctypes</code>、<code>operator</code> 等模块。
+
+指标验证有超时限制。避免无界循环、递归爆炸和逐行执行的高复杂度算法。
+
+---
+
+## 13. 完整教程：双 EMA 交叉指标
+
+~~~python
+# @param fast_len int 12 Fast EMA period range=5:30:1
+# @param slow_len int 26 Slow EMA period range=10:80:2
 # @param confirm_next_bar bool false Show markers one bar after confirmation
+# @param show_marks bool true Show crossover markers
 
 my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
+my_indicator_description = "Displays two EMAs and marks confirmed crossover events."
 
 df = df.copy()
 
 fast_len = int(params.get("fast_len", 12))
 slow_len = int(params.get("slow_len", 26))
 confirm_next_bar = bool(params.get("confirm_next_bar", False))
+show_marks = bool(params.get("show_marks", True))
 
 close = df["close"]
 high = df["high"]
 low = df["low"]
 
+
 def edge(condition):
-    s = condition.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
+    current = condition.fillna(False).astype(bool)
+    previous = current.shift(1, fill_value=False).astype(bool)
+    return current & ~previous
+
 
 def to_plot_list(series):
-    return [None if pd.isna(v) else float(v) for v in series]
+    return [
+        None if pd.isna(value) else float(value)
+        for value in series
+    ]
+
 
 ema_fast = close.ewm(span=fast_len, adjust=False).mean()
 ema_slow = close.ewm(span=slow_len, adjust=False).mean()
@@ -375,15 +538,20 @@ golden = edge(ema_fast > ema_slow)
 death = edge(ema_fast < ema_slow)
 
 if confirm_next_bar:
-    golden = golden.shift(1).fillna(False).astype(bool)
-    death = death.shift(1).fillna(False).astype(bool)
+    golden = golden.shift(1, fill_value=False).astype(bool)
+    death = death.shift(1, fill_value=False).astype(bool)
 
-buy_marks = [
-    float(low.iloc[i] * 0.995) if bool(golden.iloc[i]) else None
+golden_marks = [
+    float(low.iloc[i] * 0.995)
+    if show_marks and bool(golden.iloc[i])
+    else None
     for i in range(len(df))
 ]
-sell_marks = [
-    float(high.iloc[i] * 1.005) if bool(death.iloc[i]) else None
+
+death_marks = [
+    float(high.iloc[i] * 1.005)
+    if show_marks and bool(death.iloc[i])
+    else None
     for i in range(len(df))
 ]
 
@@ -393,63 +561,107 @@ output = {
         {
             "name": "EMA Fast",
             "data": to_plot_list(ema_fast),
-            "color": "#22c55e",
+            "color": "#22C55E",
             "type": "line",
             "overlay": True,
         },
         {
             "name": "EMA Slow",
             "data": to_plot_list(ema_slow),
-            "color": "#3b82f6",
+            "color": "#3B82F6",
             "type": "line",
             "overlay": True,
         },
     ],
     "signals": [
-        {"type": "buy", "text": "Golden", "color": "#22c55e", "data": buy_marks},
-        {"type": "sell", "text": "Death", "color": "#ef4444", "data": sell_marks},
+        {
+            "type": "buy",
+            "text": "Long Entry",
+            "color": "#22C55E",
+            "data": golden_marks,
+        },
+        {
+            "type": "sell",
+            "text": "Long Exit",
+            "color": "#EF4444",
+            "data": death_marks,
+        },
     ],
     "layers": [],
 }
-```
+~~~
+
+逐步理解：
+
+1. 参数声明决定参数面板和搜索范围。
+2. <code>params.get</code> 读取与声明完全一致的默认值。
+3. 两条 EMA 是持续状态，因此放进 plots。
+4. 金叉和死叉是一次性事件，因此经过 <code>edge</code> 后放进 signals。
+5. 空标记使用 <code>None</code>。
+6. 指标明确把死叉命名为 “Long Exit”，避免转换策略时误解成开空。
 
 ---
 
-## 13. 指标转策略前的检查清单
+## 14. 验证、调试和常见错误
 
-在点击“AI 指标转策略”前，请检查：
+建议每次按以下顺序：
 
-- 指标能正常运行，`output` 存在。
-- `plots` / `signals` 长度等于 `len(df)`。
-- 视觉标记是事件而不是持续刷屏。
-- `sell` / `Death` 的真实含义已经明确：是 long exit，还是 short entry。
-- 是否需要双向交易、反转、加仓、减仓、止损止盈。
-- 指标代码里没有旧的执行列和 `# @strategy`。
+1. 保存版本。
+2. 运行/预览指标。
+3. 执行代码验证。
+4. 检查图上起始空值、极端行情和短数据区间。
+5. 修改参数，确认参数确实影响结果。
+6. 检查信号是否只在事件 bar 出现。
 
-转换后的策略必须再跑回测。策略发布到市场前，必须至少有一条成功回测记录。
-
----
-
-## 14. 质量检查常见提示
-
-| 提示 | 含义 | 修复 |
+| 提示或错误 | 原因 | 修复 |
 | --- | --- | --- |
-| `MISSING_OUTPUT` | 没有设置 `output` | 补完整 output dict |
-| `MISSING_DF_COPY` | 没有 `df = df.copy()` | 在计算前添加 |
-| `MISSING_INDICATOR_NAME` | 缺少名称 | 添加 `my_indicator_name` |
-| `MISSING_INDICATOR_DESCRIPTION` | 缺少描述 | 添加 `my_indicator_description` |
-| `PARAM_DEFAULT_MISMATCH` | 参数默认值不一致 | 对齐 `# @param` 和 `params.get` |
-| `EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR` | 指标里写了执行列 | 删除执行列，转策略再执行 |
-| `STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR` | 指标里写了策略注解 | 删除 `# @strategy` 等旧注解 |
-| `NDARRAY_PANDAS_METHOD_MISUSE` | ndarray 被当成 Series | 使用 pandas 原生方法或包装为 Series |
+| <code>EMPTY_CODE</code> | 代码为空 | 提供完整指标源码 |
+| <code>MISSING_OUTPUT</code> | 没有设置 <code>output</code> | 添加字典输出 |
+| <code>MissingOutput</code> | 执行后未得到输出变量 | 检查分支和变量作用域 |
+| <code>InvalidOutputType</code> | <code>output</code> 不是字典 | 改为 dict |
+| <code>InvalidOutputStructure</code> | plots/signals 键都不存在 | 至少提供其中一个 |
+| <code>LengthMismatch</code> | 序列长度与 K 线不一致 | 让每个 data 等于 <code>len(df)</code> |
+| <code>MISSING_DF_COPY</code> | 缺少工作副本 | 在计算前添加 <code>df = df.copy()</code> |
+| <code>PARAM_DEFAULT_MISMATCH</code> | 声明和读取默认值不同 | 对齐两个默认值 |
+| <code>DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET</code> | 声明后没有读取 | 显式调用 <code>params.get</code> |
+| <code>EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR</code> | 指标中写了交易执行列 | 删除并转换成 V2 策略 |
+| <code>STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR</code> | 使用旧策略注解 | 删除旧注解 |
+| <code>NDARRAY_PANDAS_METHOD_MISUSE</code> | ndarray 被当作 Series | 用 pandas 写法或包装并保留索引 |
+| <code>FUTURE_DATA_LEAK</code> | 检测到未来数据 | 改为只使用当前和历史数据 |
 
 ---
 
-## 15. 最佳实践
+## 15. 转换成策略前的语义清单
 
-- 先让图表清楚，再考虑转策略。
-- 指标不要“偷偷交易”，策略不要“假装指标”。
-- 标记要少而准，持续状态用曲线/灯带。
-- 参数默认值要保守、可解释、可复现。
-- 不要使用未来函数：`shift(-1)`、`iloc[i + 1]`、居中 rolling 都应避免。
-- 发布前先保存版本，避免覆盖好用的旧实现。
+转换前明确回答：
+
+- 哪个标记是多头入场？
+- 哪个标记是多头离场？
+- 是否真的需要做空？看空离场不能自动等同于做空入场。
+- 是否需要反手？如果需要，平仓和反向开仓是否为两个独立动作？
+- 信号在哪个周期、哪根已收盘 bar 确认？
+- 是否允许重复入场、加仓或减仓？
+- 仓位大小、止损、止盈和追踪止损如何定义？
+- 交易标的和市场类型是什么？
+
+转换后应删除图表专用的颜色、标签偏移、plots、layers 和 marker 数组，保留信号代数，并用 Strategy API V2 明确声明标的、周期、仓位和风险。
+
+生成的策略必须重新验证和回测。发布到市场前，系统要求至少有一条成功回测记录。
+
+---
+
+## 16. 发布前检查清单
+
+- [ ] 名称和描述存在，且不包含收益承诺。
+- [ ] 代码注释、标识符、元数据和默认标签为英文。
+- [ ] <code>df = df.copy()</code> 已执行。
+- [ ] 每个参数都通过 <code>params.get</code> 读取，默认值一致。
+- [ ] 不包含订单、仓位、杠杆或交易风控代码。
+- [ ] <code>output</code> 是字典。
+- [ ] 每个 plot/signal data 长度都等于 <code>len(df)</code>。
+- [ ] 缺失值使用 <code>None</code>，没有 NaN 或无穷值输出。
+- [ ] signals 表示稀疏事件，持续状态放在 plots 或少量 layers。
+- [ ] 不读取未来数据。
+- [ ] numpy 结果在调用 pandas 方法前已转换成带正确索引的 Series。
+- [ ] 短数据、预热区和异常参数不会导致崩溃。
+- [ ] 已保存版本并通过预览与验证。

@@ -5,8 +5,6 @@ expose a curated subset of fields to keep the agent contract stable.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from app.services.strategy import StrategyService
 from app.utils.agent_auth import (
     SCOPE_R, SCOPE_W, agent_required, current_user_id,
@@ -25,7 +23,7 @@ _strategy_service = StrategyService()
 _PUBLIC_FIELDS = (
     "id", "strategy_name", "strategy_type", "market_category",
     "symbol", "timeframe", "status", "initial_capital", "leverage",
-    "market_type", "strategy_mode", "execution_mode",
+    "market_type", "execution_mode",
     "created_at", "updated_at",
 )
 
@@ -53,7 +51,7 @@ def list_strategies():
 @agent_v1_bp.route("/strategies/<int:strategy_id>", methods=["GET"])
 @agent_required(SCOPE_R)
 def get_strategy(strategy_id: int):
-    """Tenant-scoped strategy lookup (includes indicator_config snapshot)."""
+    """Tenant-scoped strategy lookup."""
     try:
         row = _strategy_service.get_strategy(strategy_id, user_id=current_user_id())
     except Exception as exc:
@@ -76,18 +74,13 @@ def create_strategy():
     if err:
         return err
 
-    name = (body.get("strategy_name") or "").strip()
+    name = str(body.get("name") or "").strip()
     if not name:
-        return error(400, "strategy_name is required")
-
-    payload: dict[str, Any] = dict(body)
-    payload["user_id"] = current_user_id()
-    payload.setdefault("status", "stopped")  # never auto-start from agent path
-    payload["strategy_type"] = payload.get("strategy_type") or "ScriptStrategy"
-    if payload["strategy_type"] != "ScriptStrategy":
-        return error(400, "Indicators are chart-only. Create a ScriptStrategy for execution.")
+        return error(400, "strategyV2.nameRequired")
 
     try:
+        payload = dict(body)
+        payload["user_id"] = current_user_id()
         new_id = _strategy_service.create_strategy(payload)
     except ValueError as ve:
         return error(400, str(ve))
@@ -102,40 +95,15 @@ def create_strategy():
 @agent_v1_bp.route("/strategies/<int:strategy_id>", methods=["PATCH"])
 @agent_required(SCOPE_W)
 def update_strategy(strategy_id: int):
-    """Tenant-scoped patch.  Status changes that flip a strategy to `running`
-    are rejected unless the token also has T scope; agents must explicitly
-    request live execution scope to start strategies.
-    """
+    """Update the canonical deployment configuration for one strategy."""
     body, err = get_json_or_400()
     if err:
         return err
 
-    new_status = (body.get("status") or "").strip().lower()
-    if new_status and new_status not in {"running", "stopped"}:
-        return error(400, "status must be running or stopped")
-
-    if new_status in {"running", "stopped"}:
-        from app.utils.agent_auth import current_token, parse_scopes
-        if "T" not in parse_scopes(current_token().get("scopes")):
-            return error(
-                403,
-                "Changing strategy runtime status requires T (trading) scope on this token",
-                http=403,
-            )
-
-    config_body = {k: v for k, v in body.items() if k != "status"}
     try:
-        if config_body:
-            ok = _strategy_service.update_strategy(strategy_id, config_body, user_id=current_user_id())
-        else:
-            ok = bool(_strategy_service.get_strategy(strategy_id, user_id=current_user_id()))
-
-        if ok and new_status:
-            ok = _strategy_service.update_strategy_status(
-                strategy_id,
-                new_status,
-                user_id=current_user_id(),
-            )
+        ok = _strategy_service.update_strategy(strategy_id, body, user_id=current_user_id())
+    except ValueError as exc:
+        return error(400, str(exc))
     except Exception as exc:
         logger.error(f"agent_v1/strategies update failed: {exc}", exc_info=True)
         return error(500, "update_strategy failed", details=str(exc), http=500)

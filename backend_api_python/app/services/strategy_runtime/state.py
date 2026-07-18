@@ -1,4 +1,4 @@
-"""Durable state proxy exposed to ScriptStrategy as ``ctx.state``."""
+"""Durable state storage for strategy runtime services."""
 
 from __future__ import annotations
 

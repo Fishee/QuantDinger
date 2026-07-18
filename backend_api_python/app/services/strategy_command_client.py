@@ -52,16 +52,38 @@ class StrategyCommandClient:
             command.id,
             command.status,
         )
-        return True, ""
+        return True, "strategyV2.startQueued"
 
     def stop_strategy(self, strategy_id: int, *, persist_status: bool = True) -> bool:
         del persist_status
+        result = self.stop_strategy_with_policy(strategy_id, close_positions=False)
+        return bool(result.get("success"))
+
+    def is_running(self, strategy_id: int) -> bool:
+        return bool(self.repository.has_active_strategy_lease(int(strategy_id)))
+
+    def stop_strategy_with_policy(
+        self,
+        strategy_id: int,
+        *,
+        close_positions: bool = False,
+    ) -> dict:
         try:
-            command = self.repository.enqueue(strategy_id=int(strategy_id), command_type="stop")
+            command = self.repository.enqueue(
+                strategy_id=int(strategy_id),
+                command_type="stop",
+                payload={"close_positions": bool(close_positions)},
+            )
             self._remember(strategy_id, "stop", command.id)
             timeout = max(0.0, float(os.getenv("STRATEGY_COMMAND_STOP_WAIT_SEC", "5")))
             if timeout == 0:
-                return True
+                return {
+                    "success": True,
+                    "status": "stopping",
+                    "close_requested": bool(close_positions),
+                    "close_orders_queued": 0,
+                    "close_errors": [],
+                }
             finished = self._wait(command.id, timeout)
             if finished is None or finished.status not in TERMINAL_COMMAND_STATUSES:
                 logger.warning(
@@ -69,11 +91,37 @@ class StrategyCommandClient:
                     strategy_id,
                     command.id,
                 )
-                return False
-            return finished.status == "succeeded"
-        except Exception:
+                return {
+                    "success": False,
+                    "status": "stopping",
+                    "close_requested": bool(close_positions),
+                    "close_orders_queued": 0,
+                    "close_errors": [],
+                }
+            if finished.status == "succeeded":
+                result = dict(finished.result or {})
+                result.setdefault("success", True)
+                result.setdefault("status", "stopped")
+                result.setdefault("close_requested", bool(close_positions))
+                result.setdefault("close_orders_queued", 0)
+                result.setdefault("close_errors", [])
+                return result
+            return {
+                "success": False,
+                "status": "running",
+                "close_requested": bool(close_positions),
+                "close_orders_queued": 0,
+                "close_errors": [finished.error_message] if finished.error_message else [],
+            }
+        except Exception as exc:
             logger.error("Failed to queue strategy stop: strategy=%s", strategy_id, exc_info=True)
-            return False
+            return {
+                "success": False,
+                "status": "running",
+                "close_requested": bool(close_positions),
+                "close_orders_queued": 0,
+                "close_errors": [str(exc)],
+            }
 
     def _wait(self, command_id: int, timeout: float):
         deadline = time.monotonic() + max(0.0, float(timeout))

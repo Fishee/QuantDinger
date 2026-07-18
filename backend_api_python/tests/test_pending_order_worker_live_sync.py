@@ -58,6 +58,38 @@ def test_live_sent_sync_persists_only_incremental_partial_fill(monkeypatch):
     assert snapshots[0]["filled"] == pytest.approx(0.75)
 
 
+def test_claim_live_sent_order_transitions_the_claimed_row(monkeypatch):
+    class Cursor:
+        def execute(self, sql, params):
+            assert "status = 'syncing'" in sql
+            assert "COALESCE(filled, 0) <= 0" in sql
+            assert params == (41,)
+
+        def fetchone(self):
+            return {"id": 41, "status": "syncing"}
+
+        def close(self):
+            return None
+
+    class Database:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            return None
+
+    monkeypatch.setattr(worker_module, "get_db_connection", lambda: Database())
+    worker = object.__new__(worker_module.PendingOrderWorker)
+
+    assert worker._claim_live_sent_order(41) == {"id": 41, "status": "syncing"}
+
+
 def test_live_sent_sync_finalizes_after_restart_without_duplicate_fill(monkeypatch):
     row = _row(filled=1.0, avg_price=101.0)
     worker, snapshots, persisted = _worker(

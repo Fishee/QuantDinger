@@ -22,14 +22,18 @@ class StrategyCommand:
     status: str
     idempotency_key: str
     payload: dict[str, Any]
+    result: dict[str, Any] | None = None
     attempts: int = 0
     error_message: str = ""
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "StrategyCommand":
         payload = row.get("payload_json") or {}
+        result = row.get("result_json") or {}
         if isinstance(payload, str):
             payload = json.loads(payload)
+        if isinstance(result, str):
+            result = json.loads(result)
         return cls(
             id=int(row["id"]),
             strategy_id=int(row["strategy_id"]),
@@ -38,6 +42,7 @@ class StrategyCommand:
             status=str(row["status"]),
             idempotency_key=str(row.get("idempotency_key") or ""),
             payload=dict(payload),
+            result=dict(result),
             attempts=int(row.get("attempts") or 0),
             error_message=str(row.get("error_message") or ""),
         )
@@ -203,6 +208,23 @@ class StrategyCommandRepository:
                 cur.execute("SELECT * FROM qd_strategy_commands WHERE id = %s", (int(command_id),))
                 row = cur.fetchone()
                 return StrategyCommand.from_row(dict(row)) if row else None
+            finally:
+                cur.close()
+
+    def has_active_strategy_lease(self, strategy_id: int) -> bool:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM qd_strategy_runtime_leases
+                    WHERE strategy_id = %s AND lease_expires_at >= NOW()
+                    LIMIT 1
+                    """,
+                    (int(strategy_id),),
+                )
+                return cur.fetchone() is not None
             finally:
                 cur.close()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from app.utils.db import get_db_connection
@@ -13,6 +14,12 @@ def main() -> None:
     parser.add_argument("role", choices=("trading", "scheduler", "celery"))
     parser.add_argument("--max-age", type=int, default=45)
     args = parser.parse_args()
+
+    credential_key = str(os.getenv("CREDENTIAL_ENCRYPTION_KEY") or "").strip()
+    session_key = str(os.getenv("SECRET_KEY") or "").strip()
+    if args.role in {"trading", "scheduler"} and not credential_key:
+        if not session_key or session_key == "quantdinger-secret-key-change-me":
+            sys.exit(1)
 
     with get_db_connection() as db:
         cur = db.cursor()

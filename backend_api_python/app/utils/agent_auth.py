@@ -393,7 +393,8 @@ def agent_required(scope: str = SCOPE_R):
                 return resp, code
 
             expires_at = row.get("expires_at")
-            if expires_at and isinstance(expires_at, datetime) and expires_at < datetime.utcnow():
+            now = datetime.now(tz=expires_at.tzinfo) if isinstance(expires_at, datetime) else None
+            if expires_at and isinstance(expires_at, datetime) and now is not None and expires_at < now:
                 resp, code = _err(401, "Token expired", status=401)
                 _audit(scope, 401, {"reason": "expired"}, int((time.time() - t0) * 1000))
                 return resp, code

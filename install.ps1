@@ -31,18 +31,32 @@ function Get-EnvValue($Path, $Key) {
 
 function Set-EnvValue($Path, $Key, $Value) {
     if (-not (Test-Path $Path)) { New-Item -ItemType File -Path $Path | Out-Null }
-    $lines = @(Get-Content $Path)
+    [string[]]$lines = @(Get-Content -LiteralPath $Path)
     $found = $false
-    $next = foreach ($line in $lines) {
-        if ($line -match "^$([regex]::Escape($Key))=") {
-            "$Key=$Value"
-            $found = $true
-        } else {
-            $line
+    [string[]]$next = @(
+        foreach ($line in $lines) {
+            if ($line -match "^$([regex]::Escape($Key))=") {
+                "$Key=$Value"
+                $found = $true
+            } else {
+                $line
+            }
         }
-    }
+    )
     if (-not $found) { $next += "$Key=$Value" }
-    Set-Content -Path $Path -Value $next -Encoding UTF8
+    Set-Content -LiteralPath $Path -Value $next -Encoding UTF8
+}
+
+function Repair-EnvLayout($Path, [string[]]$KnownKeys) {
+    if (-not (Test-Path $Path)) { return }
+    $content = Get-Content -LiteralPath $Path -Raw
+    if (-not $content -or -not $KnownKeys) { return }
+    $keyPattern = (($KnownKeys | ForEach-Object { [regex]::Escape($_) }) -join "|")
+    $pattern = "(?<=[^`r`n])(?=(?:$keyPattern)=)"
+    $repaired = [regex]::Replace($content, $pattern, [Environment]::NewLine)
+    if ($repaired -ne $content) {
+        Set-Content -LiteralPath $Path -Value $repaired.TrimEnd("`r", "`n") -Encoding UTF8
+    }
 }
 
 function New-HexSecret([int]$Bytes) {
@@ -110,6 +124,13 @@ function Download-Files {
     if (-not (Test-Path $RootEnv)) {
         New-Item -ItemType File -Path $RootEnv | Out-Null
     }
+    Repair-EnvLayout $RootEnv @(
+        "FRONTEND_PORT",
+        "MOBILE_PORT",
+        "BACKEND_PORT",
+        "POSTGRES_PASSWORD",
+        "IMAGE_PREFIX"
+    )
 }
 
 function Collect-Settings {

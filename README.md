@@ -4,8 +4,10 @@
   </a>
 
   <h1>QuantDinger</h1>
-  <p><strong>Self-hosted AI-assisted research, backtesting, and trading automation.</strong></p>
-  <p>Research ideas, write Python strategies, validate them, and operate paper or live workflows from one stack.</p>
+  <p><strong>Open-source AI Trading OS</strong></p>
+  <p>Turn trading ideas into Python strategies, backtests, paper trading, live execution, and monitoring — all in one self-hosted stack.</p>
+  <p><strong>QuantDinger is a product of Open Byte Inc.</strong></p>
+  <p><em>AI research → Strategy code → Backtest → Paper/Live execution → Monitoring</em></p>
 
   <p>
     <a href="README.md"><strong>English</strong></a>
@@ -15,6 +17,23 @@
     <a href="docs/api/README.md"><strong>API</strong></a>
     ·
     <a href="docs/agent/README.md"><strong>AI Agents & MCP</strong></a>
+  </p>
+
+  <p>
+    <a href="https://ai.quantdinger.com"><strong>Live App</strong></a>
+    ·
+    <a href="https://www.quantdinger.com"><strong>Website</strong></a>
+    ·
+    <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a>
+    ·
+    <a href="mailto:support@quantdinger.com"><strong>Official Support Email</strong></a>
+  </p>
+
+  <p>
+    <a href="https://t.me/quantdinger"><img src="https://img.shields.io/badge/Telegram-Join-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram"></a>
+    <a href="https://discord.com/invite/tyx5B6TChr"><img src="https://img.shields.io/badge/Discord-Server-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+    <a href="https://youtube.com/@quantdinger"><img src="https://img.shields.io/badge/YouTube-%40quantdinger-FF0000?style=flat-square&logo=youtube&logoColor=white" alt="YouTube"></a>
+    <a href="https://x.com/QuantDinger_EN"><img src="https://img.shields.io/badge/X-%40QuantDinger_EN-000000?style=flat-square&logo=x&logoColor=white" alt="X"></a>
   </p>
 
   <p>
@@ -34,14 +53,15 @@
 
 ## What QuantDinger is
 
-QuantDinger is a local-first trading platform for independent traders, Python
-strategy authors, and small teams that want to keep their data and broker
-credentials under their own control.
+QuantDinger is an **open-source AI Trading OS** for independent traders, Python
+strategy authors, and small teams. Its local-first, self-hosted design keeps
+market data, strategy code, broker credentials, and deployment under the
+operator's control.
 
 The project combines:
 
 - multi-provider AI market research and analysis;
-- Python indicators and `ScriptStrategy` development;
+- Python indicators and Strategy API V2 development;
 - server-side backtesting and experiment workflows;
 - paper and live execution across crypto exchanges and traditional brokers;
 - web, mobile H5, human API, Agent Gateway, and MCP access;
@@ -71,6 +91,15 @@ The source version is declared in [`VERSION`](VERSION). Git release tags use the
 same semantic version with a leading `v`, for example `v5.0.1`.
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/screenshots/architecture-v5.png" alt="QuantDinger v5 architecture covering clients, Agent Gateway, core platform, workers, infrastructure, observability, and the closed-loop trading workflow" width="100%">
+</p>
+
+<p align="center"><sub>The editable source is available as <a href="docs/screenshots/architecture-v5.svg">architecture-v5.svg</a>.</sub></p>
+
+The diagram above shows the complete product and process architecture. The
+runtime topology below focuses on container-to-container ownership and data flow.
 
 ```mermaid
 flowchart TB
@@ -279,7 +308,7 @@ not include credentials, account data, or exploitable details in public issues.
 | Area | Current surface |
 | --- | --- |
 | Indicators | Python chart overlays, markers, bands, and signals. |
-| Strategies | `ScriptStrategy` intents, sizing, risk, backtests, and live runtime. |
+| Strategies | Strategy API V2 intents, sizing, risk, backtests, and live runtime. |
 | Crypto | Binance, OKX, Bitget, Bybit, Gate, HTX, Coinbase Exchange, Kraken, and adapter extensions. |
 | Traditional brokers | IBKR and Alpaca workflows. |
 | AI providers | OpenRouter, OpenAI-compatible APIs, Google, DeepSeek, Grok, MiniMax, and custom endpoints. |
@@ -332,20 +361,102 @@ OpenAPI artifact when required, and pass the compatibility workflow.
 
 ## Repository layout
 
+This repository contains the backend, worker processes, deployment definitions,
+operations configuration, documentation, and MCP server. The desktop and mobile
+client source code live in separate repositories; this repository consumes their
+published images in the Compose stacks.
+
 ```text
-backend_api_python/              Flask API, domain services, workers, migrations, tests
-docs/                            Architecture, operations, API, strategy, and integration guides
-mcp_server/                      QuantDinger MCP server
-ops/                             Prometheus, Grafana, and Alertmanager configuration
-scripts/                         Version, encoding, and setup utilities
-docker-compose.yml               Core local/source stack
-docker-compose.ghcr.yml          Prebuilt-image stack
-docker-compose.production.yml    Runtime hardening overlay
-docker-compose.observability.yml Optional monitoring overlay
+QuantDinger/
+|-- .github/workflows/                 CI, security, compatibility, and release checks
+|-- backend_api_python/                Backend application and all backend processes
+|   |-- app/
+|   |   |-- __init__.py                Flask application factory and core wiring
+|   |   |-- startup.py                 Process-aware startup hooks and service singletons
+|   |   |-- celery_app.py              Celery application and task registration
+|   |   |-- commands/                  Migration, scheduler, trading, and health entrypoints
+|   |   |-- config/                    Environment-backed database, Redis, and provider config
+|   |   |-- routes/                    Human HTTP API route facades
+|   |   |   `-- agent_v1/              Scoped Agent Gateway API under /api/agent/v1
+|   |   |-- openapi/                   OpenAPI schemas, tags, registration, and export support
+|   |   |-- services/                  Domain workflows and third-party integrations
+|   |   |   |-- backtest_engine/       Backtest execution components
+|   |   |   |-- live_trading/          Normalized crypto exchange adapters
+|   |   |   |-- alpaca_trading/        Alpaca broker integration
+|   |   |   |-- ibkr_trading/          Interactive Brokers integration
+|   |   |   |-- strategy_runtime/      Strategy signals, intents, execution, and state
+|   |   |   `-- strategy_v2/           Versioned strategy contracts and runtime services
+|   |   |-- data_sources/              Raw market-data source adapters
+|   |   |-- data_providers/            Aggregated market, macro, news, and sentiment providers
+|   |   |-- markets/                   Market and symbol normalization
+|   |   |-- tasks/                     Finite, retryable Celery jobs
+|   |   |-- workers/                   Long-lived worker process shells
+|   |   |-- runtime/                   Process-role and ownership helpers
+|   |   |-- observability/             Request context, metrics, and HTTP instrumentation
+|   |   `-- utils/                     Shared low-level database, cache, auth, and logging helpers
+|   |-- migrations/                    PostgreSQL schema and seed migrations
+|   |-- scripts/                       Backend maintenance and validation commands
+|   |-- tests/                         Unit, contract, integration, and release-gate tests
+|   |-- run.py                         Local Flask and Gunicorn application entrypoint
+|   |-- Dockerfile                     Shared image for API and worker containers
+|   `-- docker-entrypoint.sh           Container command dispatcher
+|-- docs/
+|   |-- architecture/                  Boundaries, concurrency, API, and extension design
+|   |-- deployment/                    Installation, production, and observability operations
+|   |-- trading/                       Strategy and indicator development guides
+|   |-- api/                           Human API documentation
+|   `-- agent/                         Agent Gateway and MCP documentation
+|-- mcp_server/                        Standalone QuantDinger MCP server package
+|   |-- src/quantdinger_mcp/           MCP server and security implementation
+|   `-- tests/                         MCP contract and security tests
+|-- ops/                               Runtime operations configuration
+|   |-- prometheus/                    Scrape configuration and alert rules
+|   |-- grafana/                       Provisioned data sources and dashboards
+|   `-- alertmanager/                  Alert routing configuration
+|-- scripts/                           Repository-level version, encoding, and setup checks
+|-- docker-compose.yml                 Core local/source stack
+|-- docker-compose.ghcr.yml            Prebuilt-image installation stack
+|-- docker-compose.production.yml      Production hardening overlay
+|-- docker-compose.observability.yml   Optional monitoring overlay
+|-- install.sh / install.ps1           Linux/macOS and Windows installers
+`-- VERSION                            Canonical source version
 ```
 
-The web and mobile source repositories publish their own GHCR images. Node.js is
-only needed when building those clients from source.
+### Main execution paths
+
+| Flow | Path through the repository |
+| --- | --- |
+| Synchronous API request | `app/routes` -> `app/services` -> database, cache, market-data, or trading adapter |
+| Durable strategy command | API route -> PostgreSQL command record -> `trading-worker` -> strategy runtime and broker adapter |
+| Finite background job | API or Celery beat -> job Redis -> `app/tasks` in `celery-worker` -> PostgreSQL result |
+| Scheduled domain work | `app/commands/scheduler.py` -> scheduling services -> durable state and notifications |
+| Monitoring | API and workers -> `app/observability` metrics -> Prometheus -> Grafana and Alertmanager |
+| Agent or MCP call | MCP client -> `mcp_server` -> `/api/agent/v1` -> the same service layer used by human APIs |
+
+Long-lived trading loops belong to the trading worker. Finite, retryable work
+belongs to Celery. HTTP routes validate and delegate; they must not own trading
+loops, exchange-specific behavior, or large database workflows.
+
+### Where changes belong
+
+| Change | Primary location | Usually update as well |
+| --- | --- | --- |
+| Add or modify an HTTP endpoint | `backend_api_python/app/routes/` | `app/openapi/`, route/contract tests, API docs |
+| Add a business workflow | `backend_api_python/app/services/` | focused service tests |
+| Add an exchange or broker integration | `app/services/live_trading/` or the broker package | credential policy, adapter tests, docs |
+| Add a market-data source | `app/data_sources/` | provider aggregation, cache keys, tests |
+| Add dashboard, news, or macro aggregation | `app/data_providers/` | route facade and cache policy |
+| Add a finite asynchronous task | `app/tasks/` | `celery_app.py`, queue routing, task tests |
+| Add long-lived process behavior | `app/workers/`, `app/commands/`, or `app/runtime/` | Compose command, health checks, ownership tests |
+| Change the database schema | `backend_api_python/migrations/` | migration/release-gate tests and docs |
+| Add metrics or alerts | `app/observability/` and `ops/` | dashboard, alert rule, observability docs |
+| Add an MCP tool | `mcp_server/src/quantdinger_mcp/` | Agent Gateway scope, security tests, agent docs |
+
+The web and mobile repositories publish their own GHCR images. Node.js is only
+needed when building those clients from source. For deeper ownership rules, read
+[Architecture](docs/architecture/ARCHITECTURE.md),
+[Module boundaries](docs/architecture/MODULE_BOUNDARIES.md), and
+[Process roles](docs/architecture/PROCESS_ROLES_AND_TASKS.md).
 
 ## Documentation
 
@@ -373,12 +484,132 @@ before opening a pull request. Keep routes thin, preserve API compatibility,
 place long-running behavior in the correct process, and include focused tests
 for high-risk changes.
 
-## License and community
+## Exchange partner links
 
-The repository is licensed under [Apache License 2.0](LICENSE). The QuantDinger
-name and marks are covered separately by [TRADEMARKS.md](TRADEMARKS.md).
+These are referral links. QuantDinger may receive a commission or trading-fee
+rebate when a user registers through one of them. This does not add a separate
+charge to the user; eligibility and terms are controlled by each venue and may
+change. Always verify the destination domain before creating an account.
 
-- Issues: <https://github.com/brokermr810/QuantDinger/issues>
-- Telegram: <https://t.me/quantdinger>
-- Discord: <https://discord.com/invite/tyx5B6TChr>
-- Website: <https://www.quantdinger.com>
+The same links are available in the application under **Profile → Open account**
+and **Broker Accounts → Open account**.
+
+| Exchange | Signup link |
+| --- | --- |
+| Binance | [Register](https://www.bsmkweb.cc/register?ref=QUANTDINGER) |
+| Bitget | [Register](https://partner.hdmune.cn/bg/7r4xz8kd) |
+| Bybit | [Register](https://partner.bybit.com/b/DINGER) |
+| OKX | [Register](https://www.xqmnobxky.com/join/QUANTDINGER) |
+| Gate.io | [Register](https://www.gateport.business/share/DINGER) |
+| HTX | [Register](https://www.htx.com/invite/zh-cn/1f?invite_code=dinger) |
+
+## License and commercial terms
+
+- Backend source code is licensed under [Apache License 2.0](LICENSE).
+- QuantDinger is a product of **Open Byte Inc**. The name, logo, product
+  identity, and commercial licensing are managed separately from the code license.
+- Web frontend source is published in
+  [QuantDinger Frontend](https://github.com/brokermr810/QuantDinger-Vue) under
+  its own source-available license.
+- Mobile H5 and native client source is published in
+  [QuantDinger Mobile](https://github.com/brokermr810/QuantDinger-Mobile) under
+  its own source-available license.
+- Trademark, branding, attribution, and watermark use is governed by
+  [TRADEMARKS.md](TRADEMARKS.md). Apache 2.0 does not grant trademark rights.
+
+For commercial licensing, frontend source access, branding authorization, or
+deployment support:
+
+- Website: [quantdinger.com](https://www.quantdinger.com)
+- Telegram: [t.me/worldinbroker](https://t.me/worldinbroker)
+- Email: [support@quantdinger.com](mailto:support@quantdinger.com)
+
+## Legal notice and compliance
+
+QuantDinger is intended for **lawful research, education, and compliant trading
+only**. It must not be used for fraud, market manipulation, sanctions evasion,
+money laundering, or other illegal activity. Operators are responsible for
+following the laws, licensing requirements, tax rules, broker or exchange terms,
+and data regulations that apply in every jurisdiction where they deploy or use
+the software.
+
+**This project does not provide legal, tax, investment, financial, or regulatory
+advice.** Trading, including automated and leveraged trading, can result in the
+loss of some or all capital. Historical data, backtests, simulated results, AI
+output, indicators, and strategy examples do not guarantee future performance.
+Users must independently review strategies, permissions, order limits, and risk
+controls before enabling live execution.
+
+The software is provided under the terms of the applicable license and is used
+at the operator's own risk. To the extent permitted by law, project maintainers
+and contributors disclaim liability for trading losses, data loss, service
+interruption, third-party failures, security incidents, or regulatory consequences
+arising from use or misuse of the software.
+
+## Community and support
+
+<p>
+  <a href="https://t.me/quantdinger"><img src="https://img.shields.io/badge/Telegram-Group-26A5E4?style=for-the-badge&logo=telegram" alt="Telegram"></a>
+  <a href="https://discord.com/invite/tyx5B6TChr"><img src="https://img.shields.io/badge/Discord-Server-5865F2?style=for-the-badge&logo=discord" alt="Discord"></a>
+  <a href="https://youtube.com/@quantdinger"><img src="https://img.shields.io/badge/YouTube-Channel-FF0000?style=for-the-badge&logo=youtube" alt="YouTube"></a>
+  <a href="https://x.com/QuantDinger_EN"><img src="https://img.shields.io/badge/X-Follow-000000?style=for-the-badge&logo=x" alt="X"></a>
+</p>
+
+- [Website](https://www.quantdinger.com)
+- [Contributing guide](CONTRIBUTING.md)
+- [Contributors](CONTRIBUTORS.md)
+- [Report bugs or request features](https://github.com/brokermr810/QuantDinger/issues)
+- Email: [support@quantdinger.com](mailto:support@quantdinger.com)
+
+## Support the project
+
+If QuantDinger is useful to you, a GitHub star, contribution, or donation helps
+fund ongoing development and infrastructure.
+
+Crypto donation address:
+
+```text
+0x96fa4962181bea077f8c7240efe46afbe73641a7
+```
+
+Crypto transfers are irreversible. Confirm the address and intended network with
+the project maintainers before sending funds.
+
+## Star history
+
+[![Star History Chart](https://api.star-history.com/svg?repos=brokermr810/QuantDinger&type=Date)](https://star-history.com/#brokermr810/QuantDinger&Date)
+
+## Acknowledgements
+
+QuantDinger stands on top of a strong open-source ecosystem. Special thanks to
+the maintainers and contributors of projects including:
+
+- [Flask](https://flask.palletsprojects.com/)
+- [Gunicorn](https://gunicorn.org/)
+- [Celery](https://docs.celeryq.dev/)
+- [PostgreSQL](https://www.postgresql.org/)
+- [Redis](https://redis.io/)
+- [Pandas](https://pandas.pydata.org/)
+- [NumPy](https://numpy.org/)
+- [CCXT](https://github.com/ccxt/ccxt)
+- [yfinance](https://github.com/ranaroussi/yfinance)
+- [AkShare](https://github.com/akfamily/akshare)
+- [Vue.js](https://vuejs.org/)
+- [Ant Design Vue](https://antdv.com/)
+- [KLineCharts](https://github.com/klinecharts/KLineChart)
+- [ECharts](https://echarts.apache.org/)
+- [Capacitor](https://capacitorjs.com/)
+- [bip-utils](https://github.com/ebellocchia/bip_utils)
+- [Prometheus](https://prometheus.io/)
+- [Grafana](https://grafana.com/)
+
+## P.S. — A note on the name
+
+**QuantDinger** is a small tribute to
+**[Erwin Schrödinger](https://en.wikipedia.org/wiki/Erwin_Schr%C3%B6dinger)** —
+the “-dinger” in our name is the tail of “Schrödinger”. The cat in the box was a
+thought experiment; every un-fired strategy is its own little version of it —
+simultaneously winning and losing until the order actually fills. Backtests open
+the box. Live trading collapses the wavefunction. Trade carefully.
+
+<p align="center"><sub>If QuantDinger is useful to you, a GitHub star helps the project a lot.</sub></p>

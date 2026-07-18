@@ -155,7 +155,7 @@ def add_watchlist_item(
                 instrument_id, settle_currency, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-            ON CONFLICT(user_id, market, symbol, exchange_id, market_type, instrument_id) DO UPDATE SET
+            ON CONFLICT(user_id, market, symbol) DO UPDATE SET
                 name = excluded.name,
                 settle_currency = excluded.settle_currency,
                 updated_at = NOW()

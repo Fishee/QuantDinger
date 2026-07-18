@@ -5,10 +5,21 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.services.experiment.scoring import StrategyScoringService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _score_result(result: Dict[str, Any]) -> float:
+    trades = float(result.get("totalTrades") or 0)
+    if trades <= 0:
+        return 0.0
+    total_return = float(result.get("totalReturn") or 0)
+    sharpe = float(result.get("sharpeRatio") or 0)
+    drawdown = abs(float(result.get("maxDrawdown") or 0))
+    win_rate = float(result.get("winRate") or 0)
+    score = 50 + total_return * 0.2 + sharpe * 10 + win_rate * 0.1 - drawdown * 0.25
+    return max(0.0, min(100.0, score))
 
 
 def parse_backtest_result(raw: str) -> Optional[Dict[str, Any]]:
@@ -46,7 +57,6 @@ def summarise_backtest_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not runs:
         return empty
 
-    scorer = StrategyScoringService()
     scored: List[Tuple[float, int, Dict[str, Any]]] = []
     symbols: List[str] = []
     timeframes: List[str] = []
@@ -56,8 +66,7 @@ def summarise_backtest_runs(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not result:
             continue
         try:
-            score_info = scorer.score_result(result)
-            score_val = float(score_info.get("overallScore") or 0)
+            score_val = _score_result(result)
         except Exception:
             logger.debug("score_result failed for run %s", run.get("id"), exc_info=True)
             score_val = 0.0
@@ -130,18 +139,11 @@ def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int,
                     """
                     SELECT id, symbol, timeframe, start_date, end_date, result_json
                     FROM qd_backtest_runs
-                    WHERE run_type = 'strategy_script'
+                    WHERE source_id = %s
                       AND status = 'success'
                       AND result_json IS NOT NULL AND result_json != ''
-                      AND (
-                        config_snapshot::text LIKE %s
-                        OR config_snapshot::text LIKE %s
-                      )
                     """,
-                    (
-                        f'%"scriptSourceId": {source_script_id}%',
-                        f'%"scriptSourceId":{source_script_id}%',
-                    ),
+                    (source_script_id,),
                 )
                 rows = [dict(row) for row in (cur.fetchall() or [])]
             elif source_strategy_id:
@@ -150,7 +152,6 @@ def fetch_market_asset_kpis(cur: Any, assets: List[Dict[str, Any]]) -> Dict[int,
                     SELECT id, symbol, timeframe, start_date, end_date, result_json
                     FROM qd_backtest_runs
                     WHERE strategy_id = %s
-                      AND run_type LIKE 'strategy_%%'
                       AND status = 'success'
                       AND result_json IS NOT NULL AND result_json != ''
                     """,

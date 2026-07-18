@@ -1,237 +1,368 @@
 # QuantDinger Indicator Development Guide
 
-This guide defines the current QuantDinger indicator contract. It is the shared reference for human authors, AI generators, validators, and reviewers.
+> Applies to: the current QuantDinger chart-indicator contract
+> Audience: first-time indicator authors, developers migrating Pine/TDX formulas, and reviewers of AI-generated code
 
-The core boundary is simple: **an indicator is for chart display only, not trading execution.**
+A QuantDinger indicator is a Python chart program that runs in the Indicator IDE. It reads the current K-line DataFrame, calculates aligned series, and returns plots, markers, and sparse chart layers through <code>output</code>.
 
-Indicator code draws plots, lamps, markers, zones, channels, labels, and other chart annotations. It must not place orders, backtest, run live trading, size positions, set leverage, or define stop-loss/take-profit execution. To trade an idea, convert the indicator through the Indicator-to-Strategy workflow and validate the generated ScriptStrategy in the strategy page and backtest center.
+The most important boundary is: **an indicator is for chart analysis, not trade execution.**
 
-Legacy `IndicatorStrategy`, `# @strategy`, `signal_form`, `exit_owner`, `open_long`, `close_long`, `df["buy"]`, and `df["sell"]` patterns are no longer part of the indicator contract.
+An indicator cannot place orders, backtest, run live trading, read an account, manage positions, enable leverage, or execute stop-loss/take-profit rules. To trade an idea, convert its visual signals into a Strategy API V2 strategy, then verify, backtest, and deploy that strategy separately.
 
 ---
 
-## 1. Product Boundary
+## 1. Build a minimal indicator first
 
-| Asset | Owns | Does Not Own |
+Paste this into the Indicator IDE and run it:
+
+~~~python
+my_indicator_name = "Close Line"
+my_indicator_description = "Displays the close price as a chart overlay."
+
+df = df.copy()
+
+close_line = [
+    None if pd.isna(value) else float(value)
+    for value in df["close"]
+]
+
+output = {
+    "name": my_indicator_name,
+    "plots": [
+        {
+            "name": "Close",
+            "data": close_line,
+            "color": "#3B82F6",
+            "type": "line",
+            "overlay": True,
+        }
+    ],
+    "signals": [],
+    "layers": [],
+}
+~~~
+
+This is the complete minimal contract:
+
+1. Declare display metadata.
+2. Create a working copy with <code>df = df.copy()</code>.
+3. calculate data aligned one-to-one with the K-line rows.
+4. Set the <code>output</code> dictionary.
+
+For a new indicator, first draw one line, then add parameters, then event markers, and only then add advanced layers.
+
+---
+
+## 2. Indicator, strategy, and conversion boundaries
+
+| Artifact | Owns | Does not own |
 | --- | --- | --- |
-| Chart Indicator | chart visuals, parameters, visual markers, analysis overlays | backtest, live trading, orders, positions, leverage, risk execution |
-| ScriptStrategy | backtest, live trading, order intents, position state, risk, logs | indicator `output` rendering |
-| Indicator-to-Strategy | translation from visual signal meaning to executable strategy | mixing execution behavior into indicator code |
+| Chart Indicator | plots, panes, lamp rows, visual markers, zones, labels | backtest, live trading, orders, positions, leverage, execution risk |
+| Strategy API V2 | subscriptions, signals, order intents, positions, backtest, live execution, protections | Indicator IDE <code>output</code> rendering |
+| Indicator-to-Strategy | translating visual signal meaning into executable code | mixing order behavior into the source indicator |
 
-`output["signals"]` are visual markers only. A `sell` or `Death` marker means a bearish or exit visual context; it does not automatically open a short or reverse a position.
+<code>output["signals"]</code> contains chart markers only. A <code>sell</code>-oriented “Death” marker may mean a long-exit warning or weakening conditions. It does not automatically open a short or reverse a position.
 
-For a long-only indicator conversion:
+For a long-only conversion, the usual mapping is:
 
-- `buy` / `Golden` / `Bullish` usually maps to `open_long`
-- `sell` / `Death` / `Bearish exit` usually maps to `close_long`
-- `open_short` is generated only when the user explicitly asks for shorting, both-side trading, or reversal behavior
+- explicit bullish entry event → <code>open_long</code>
+- explicit bearish exit event → <code>close_long</code>
+- generate <code>open_short</code> only when the user explicitly requests shorting and provides a distinct bearish entry rule
+
+Do not create execution columns such as <code>open_long</code>, <code>close_long</code>, <code>open_short</code>, <code>close_short</code>, <code>add_long</code>, or <code>reduce_long</code> in an indicator. Do not use legacy <code># @strategy</code> annotations.
 
 ---
 
-## 2. Runtime Environment
+## 3. Runtime and input data
 
 The runtime provides:
 
-- `df`: the current chart's K-line DataFrame, ordered oldest to newest.
-- `params`: a dict populated from `# @param` declarations and the parameter panel.
-- `pd` / `np`: preloaded pandas and numpy handles.
+- <code>df</code>: a pandas DataFrame for the current chart, ordered oldest to newest, one row per bar.
+- <code>params</code>: a dict produced by merging declared defaults with values from the parameter panel.
+- <code>pd</code>: preloaded pandas.
+- <code>np</code>: preloaded numpy.
+- <code>open</code>, <code>high</code>, <code>low</code>, <code>close</code>, and <code>volume</code>: some runtime entries also expose convenience Series. Prefer explicit <code>df["close"]</code> access for clarity and portability.
 
-Common columns:
+Standard OHLCV access:
 
-```python
-open_ = df["open"]
+~~~python
+open_price = df["open"]
 high = df["high"]
 low = df["low"]
 close = df["close"]
 volume = df["volume"]
-```
+~~~
 
-Start mutable work with:
+Important rules:
 
-```python
+- Do not assume a <code>time</code> column exists; time may already be the DataFrame index.
+- Do not rename or remove required OHLCV columns.
+- Check before using optional fields, for example <code>if "turnover" in df.columns:</code>.
+- Run <code>df = df.copy()</code> before mutations.
+- Prefer vectorized <code>rolling</code>, <code>ewm</code>, <code>shift</code>, and <code>where</code> operations for core series.
+
+---
+
+## 4. Recommended file structure and metadata
+
+~~~python
+# @param period int 20 Calculation period
+
+my_indicator_name = "Example Indicator"
+my_indicator_description = "Explains what is drawn and how events are marked."
+
 df = df.copy()
-```
 
-Do not assume a `time` column always exists or always has the same dtype.
+period = int(params.get("period", 20))
 
----
+# Helper functions
+# Series calculation
+# Marker construction
 
-## 3. Sandbox Rules
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "layers": [],
+}
+~~~
 
-Indicator code runs inside a sandbox. Do not use:
+Every indicator should declare:
 
-- network calls, file I/O, database access, subprocesses
-- `eval`, `exec`, `compile`, `open`, `__import__`
-- `globals`, `vars`, `dir`, dunder escapes, sandbox-breaking metaprogramming
-- `getattr`, `setattr`, or `delattr` against untrusted names
-- imports such as `os`, `sys`, `requests`, `socket`, `subprocess`, `threading`, `sqlite3`, `multiprocessing`, `pathlib`, `tempfile`, `glob`, `io`, `pickle`, `ctypes`, or `operator`
-
-Usually you do not need `import pandas` or `import numpy`; `pd` and `np` already exist.
-
----
-
-## 4. Required Metadata
-
-Every indicator should define:
-
-```python
+~~~python
 my_indicator_name = "Dual EMA Viewer"
 my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
-```
+~~~
 
-These fields are used in lists, saved records, marketplace displays, and AI conversion context. Describe what the indicator draws and what its parameters mean; do not make trading-performance claims.
+Keep the name short and stable. The description should say:
+
+- what is calculated;
+- whether it appears on the price chart or a separate pane;
+- what each event marker means;
+- which parameters matter.
+
+Do not promise returns or imply live validation.
+
+Project source rules require English identifiers, metadata, comments, parameter descriptions, and default display labels. Localize display text only when a user explicitly requests a target language.
 
 ---
 
-## 5. Parameters
+## 5. Declaring parameters
 
-Declare tunable parameters with `# @param`:
+Syntax:
 
-```python
+~~~python
+# @param <name> <int|float|bool|str> <default> <description>
+~~~
+
+Example:
+
+~~~python
 # @param fast_len int 12 Fast EMA period
 # @param slow_len int 26 Slow EMA period
-# @param show_marks bool true Show crossover markers
 # @param band_pct float 1.5 Channel width percent
-```
+# @param show_marks bool true Show crossover markers
+# @param source str close Price source
+~~~
 
-Read them explicitly:
+A declaration does not create a Python variable. Read every value explicitly:
 
-```python
+~~~python
 fast_len = int(params.get("fast_len", 12))
 slow_len = int(params.get("slow_len", 26))
-show_marks = bool(params.get("show_marks", True))
 band_pct = float(params.get("band_pct", 1.5))
-```
+show_marks = bool(params.get("show_marks", True))
+source = str(params.get("source", "close"))
+~~~
 
-Rules:
+Contract rules:
 
-- The declared default must match the `params.get(..., default)` fallback.
-- Parameters control calculation and display only.
-- Do not declare trading configuration such as `direction`, `market_type`, `investment_amount`, `leverage`, `stop_loss`, `take_profit`, or `position_size`.
-- Boolean defaults may be written as `true` / `false` in comments and `True` / `False` in Python.
+- Declare one parameter per line.
+- Use valid Python identifiers for names.
+- Use only <code>int</code>, <code>float</code>, <code>bool</code>, <code>str</code>, or <code>string</code>.
+- The declared default must match the <code>params.get</code> fallback after type conversion.
+- Write booleans as <code>true</code>/<code>false</code> in declarations and <code>True</code>/<code>False</code> in Python.
+- A string default cannot contain spaces because it is parsed as one token.
+
+Declare search candidates at the end of the description:
+
+~~~python
+# @param period int 20 Lookback period range=5:60:5
+# @param multiplier float 2.0 Band multiplier values=1.5,2.0,2.5,3.0
+~~~
+
+<code>range=start:end:step</code> produces an inclusive arithmetic sequence. <code>values=a,b,c</code> declares an explicit list. One parameter expands to at most 1,024 values. Range markers are removed from the human-facing description.
+
+Indicator parameters control calculations and display only. Do not declare account, symbol, timeframe, position, leverage, stop-loss, or take-profit settings.
 
 ---
 
-## 6. Output Shape
+## 6. The output contract
 
-Set an `output` dict:
+The program must finish by setting a dict named <code>output</code>:
 
-```python
+~~~python
 output = {
     "name": my_indicator_name,
     "plots": plots,
     "signals": signals,
     "layers": layers,
 }
-```
+~~~
 
 Optional:
 
-```python
+~~~python
 output["calculatedVars"] = {}
-```
+~~~
 
-Length rules:
+Validation rules:
 
-- Every `plot["data"]` must have length `len(df)`.
-- Every `signal["data"]` must have length `len(df)`.
-- `layers` do not need per-bar arrays, but their indices/times/prices must be meaningful for the current data.
+- <code>output</code> must be a dict.
+- At least the <code>plots</code> or <code>signals</code> key must exist.
+- Every <code>plot["data"]</code> must have length <code>len(df)</code>.
+- Every <code>signal["data"]</code> must have length <code>len(df)</code>.
+- Do not emit NaN, positive infinity, or negative infinity; use <code>None</code> for missing points.
+- Layers do not need per-bar arrays, but indices, times, and prices must be meaningful for the current data.
+
+Explicit empty lists are recommended:
+
+~~~python
+output = {
+    "name": my_indicator_name,
+    "plots": [],
+    "signals": [],
+    "layers": [],
+}
+~~~
 
 ---
 
-## 7. plots
+## 7. plots: price overlays and pane series
 
-Use `plots` for lines, histograms, lamps, oscillators, and other per-bar visual series.
+Each plot normally contains:
 
-```python
+| Field | Type | Meaning |
+| --- | --- | --- |
+| <code>name</code> | str | legend and series name |
+| <code>data</code> | list | values/<code>None</code>, length <code>len(df)</code> |
+| <code>color</code> | str | preferably <code>#RRGGBB</code> |
+| <code>overlay</code> | bool | <code>True</code> on price chart, <code>False</code> in a pane |
+| <code>type</code> | optional str | commonly <code>line</code>; other current renderer styles may be used |
+
+~~~python
 plots = [
     {
         "name": "EMA Fast",
-        "data": ema_fast_values,
-        "color": "#22c55e",
+        "data": fast_values,
+        "color": "#22C55E",
         "type": "line",
         "overlay": True,
     },
     {
         "name": "RSI",
         "data": rsi_values,
-        "color": "#3b82f6",
+        "color": "#8B5CF6",
         "type": "line",
         "overlay": False,
     },
 ]
-```
+~~~
 
-Price moving averages, bands, and channels usually use `overlay=True`. RSI, MACD histograms, and lamp rows usually use `overlay=False`.
+Moving averages, Bollinger bands, and price channels normally overlay the main chart. RSI, MACD, and lamp rows normally use separate panes.
 
-For missing values:
+Use one missing-value conversion helper:
 
-```python
+~~~python
 def to_plot_list(series):
-    return [None if pd.isna(v) else float(v) for v in series]
-```
+    return [
+        None if pd.isna(value) else float(value)
+        for value in series
+    ]
+~~~
 
-Avoid filling price overlays with zero during warm-up periods; that creates misleading chart lines.
+Do not fill warm-up gaps in price overlays with zero. It draws misleading lines from zero to the actual market price.
 
 ---
 
-## 8. signals
+## 8. signals: sparse visual events
 
-Use `signals` for visual event markers:
-
-```python
+~~~python
 signals = [
-    {"type": "buy", "text": "Golden", "color": "#22c55e", "data": buy_marks},
-    {"type": "sell", "text": "Death", "color": "#ef4444", "data": sell_marks},
+    {
+        "type": "buy",
+        "text": "Long Entry",
+        "color": "#22C55E",
+        "data": entry_marks,
+    },
+    {
+        "type": "sell",
+        "text": "Long Exit",
+        "color": "#EF4444",
+        "data": exit_marks,
+    },
 ]
-```
+~~~
 
 Rules:
 
-- `type` is a visual direction, commonly `buy` or `sell`.
-- `data` is a list of `None` or float prices with length `len(df)`.
-- Mark one-bar events by default, not continuous states.
-- Continuous regimes belong in `plots`, lamp rows, or `layers`.
+- <code>type</code> is commonly <code>buy</code> or <code>sell</code>. It controls marker orientation, not the signal name.
+- <code>text</code> is the stable name. Optional <code>textData</code> can provide a per-bar label.
+- Only a finite numeric <code>data[i]</code> activates a signal on bar i.
+- <code>text</code> and <code>textData</code> never activate a signal by themselves.
+- Empty positions must contain real <code>None</code> values.
+- Mark one-bar events by default instead of repeating a persistent state.
 
-Recommended edge helper:
+Convert a state into its rising edge:
 
-```python
+~~~python
 def edge(condition):
-    s = condition.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
-```
+    current = condition.fillna(False).astype(bool)
+    previous = current.shift(1, fill_value=False).astype(bool)
+    return current & ~previous
+~~~
 
-Marker generation:
+Build marker-price lists:
 
-```python
-buy_signal = edge(ema_fast > ema_slow)
-sell_signal = edge(ema_fast < ema_slow)
+~~~python
+entry_event = edge(ema_fast > ema_slow)
+exit_event = edge(ema_fast < ema_slow)
 
-buy_marks = [
-    float(df["low"].iloc[i] * 0.995) if bool(buy_signal.iloc[i]) else None
+entry_marks = [
+    float(df["low"].iloc[i] * 0.995)
+    if bool(entry_event.iloc[i])
+    else None
     for i in range(len(df))
 ]
-sell_marks = [
-    float(df["high"].iloc[i] * 1.005) if bool(sell_signal.iloc[i]) else None
+
+exit_marks = [
+    float(df["high"].iloc[i] * 1.005)
+    if bool(exit_event.iloc[i])
+    else None
     for i in range(len(df))
 ]
-```
+~~~
 
-For "show after confirmation", shift the event:
+For “show on the next bar after confirmation”:
 
-```python
-confirmed_buy = edge(raw_buy).shift(1).fillna(False).astype(bool)
-```
+~~~python
+confirmed_entry = edge(raw_entry).shift(
+    1,
+    fill_value=False,
+).astype(bool)
+~~~
+
+This moves a completed event later; it does not read future data.
 
 ---
 
-## 9. layers
+## 9. layers: zones, lines, and labels
 
-Use `layers` for sparse chart annotations such as supply/demand zones, support/resistance, channels, invalidation ranges, and labels. Do not add many layers by default.
+Prefer plots and signals for normal indicators. Add layers only for supply/demand zones, support/resistance, channels, invalidation levels, or structure labels that materially improve readability.
 
 Zone:
 
-```python
+~~~python
 {
     "type": "zone",
     "startIndex": 120,
@@ -239,124 +370,158 @@ Zone:
     "top": 105.2,
     "bottom": 101.8,
     "text": "Demand",
-    "fillColor": "#22c55e",
-    "borderColor": "#22c55e",
+    "fillColor": "#22C55E",
+    "borderColor": "#22C55E",
     "opacity": 0.12,
 }
-```
+~~~
 
-Line:
+Horizontal line:
 
-```python
+~~~python
 {
     "type": "line",
     "startIndex": 100,
     "endIndex": len(df) - 1,
     "price": 98.5,
     "text": "Support",
-    "color": "#f59e0b",
+    "color": "#F59E0B",
     "dashed": True,
 }
-```
+~~~
 
-Labels:
+For a sloped line, replace <code>price</code> with <code>startPrice</code> and <code>endPrice</code>. Label:
 
-```python
+~~~python
 {
     "type": "label",
     "index": len(df) - 1,
     "price": float(df["close"].iloc[-1]),
-    "text": "Trend weakens",
-    "color": "#ef4444",
-    "textColor": "#ffffff",
+    "text": "Trend Weakens",
+    "color": "#EF4444",
+    "textColor": "#FFFFFF",
 }
-```
+~~~
 
-Layers are still visual only. Do not use them as orders or risk rules.
+Indices are the most stable representation for the current <code>df</code>. Matching <code>startTime</code>, <code>endTime</code>, and <code>time</code> values are also supported.
 
----
-
-## 10. pandas / numpy Type Pitfalls
-
-The most common AI-generated bug is treating ndarray values as pandas Series.
-
-Bad:
-
-```python
-x = np.where(close > close.shift(1), close, 0)
-ma = x.rolling(10).mean()
-```
-
-`np.where` may return ndarray, and ndarray has no `.rolling()`.
-
-Good:
-
-```python
-x = close.where(close > close.shift(1), 0)
-ma = x.rolling(10).mean()
-```
-
-If wrapping ndarray is necessary:
-
-```python
-arr = np.where(close > close.shift(1), close, 0)
-x = pd.Series(arr, index=df.index)
-```
-
-Always pass `index=df.index`; otherwise DatetimeIndex alignment can silently break calculations.
+Layers remain visual objects. They do not represent real orders, positions, or hosted stops.
 
 ---
 
-## 11. Legacy Execution Fields Are Forbidden
+## 10. pandas and numpy type traps
 
-Do not write these in indicator code:
+The most common failure is treating a numpy ndarray as a pandas Series.
 
-```python
-# @strategy stopLossPct 0.02
-# signal_form: four_way
-# exit_owner: engine
-# flip_mode: R2
+Incorrect:
 
-df["buy"] = ...
-df["sell"] = ...
-df["open_long"] = ...
-df["close_long"] = ...
-df["open_short"] = ...
-df["close_short"] = ...
-df["add_long"] = ...
-df["reduce_long"] = ...
-```
+~~~python
+values = np.where(close > close.shift(1), close, 0)
+average = values.rolling(10).mean()
+~~~
 
-These fields do not make an indicator trade. They only confuse users and AI generators. Use ScriptStrategy for execution.
+<code>np.where</code> may return ndarray, which has no <code>rolling</code>, <code>shift</code>, <code>ewm</code>, <code>fillna</code>, or <code>iloc</code>.
+
+Prefer pandas-native operations:
+
+~~~python
+values = close.where(close > close.shift(1), 0)
+average = values.rolling(10).mean()
+~~~
+
+When wrapping an ndarray is unavoidable:
+
+~~~python
+array = np.where(close > close.shift(1), close, 0)
+values = pd.Series(array, index=df.index)
+~~~
+
+Always pass <code>index=df.index</code>. Otherwise the new RangeIndex can silently misalign with a DatetimeIndex.
+
+| numpy form | Preferred pandas form |
+| --- | --- |
+| <code>np.where(cond, a, b)</code> | <code>a.where(cond, b)</code> |
+| <code>np.maximum(s, 0)</code> | <code>s.clip(lower=0)</code> |
+| <code>np.minimum(s, k)</code> | <code>s.clip(upper=k)</code> |
+| <code>np.abs(s)</code> | <code>s.abs()</code> |
 
 ---
 
-## 12. Full Example: Dual EMA Viewer
+## 11. Avoid look-ahead and repainting
 
-```python
-# @param fast_len int 12 Fast EMA period
-# @param slow_len int 26 Slow EMA period
+An indicator may use only the current and earlier bars. Do not use:
+
+- <code>shift(-1)</code> or <code>shift(-N)</code>;
+- <code>iloc[i + 1]</code> inside row loops;
+- <code>bars_ago(-N)</code>;
+- <code>rolling(..., center=True)</code>;
+- the final full-dataset row to rewrite past signals;
+- future highs, lows, or confirmations to mark an earlier bar.
+
+A valid crossover uses the current and previous state:
+
+~~~python
+cross_up = (
+    (ema_fast > ema_slow)
+    & (ema_fast.shift(1) <= ema_slow.shift(1))
+)
+~~~
+
+If a signal requires the current close to confirm, its converted strategy should execute later. Do not move the signal backward merely to improve the chart or backtest.
+
+---
+
+## 12. Sandbox and safety rules
+
+Allowed computational modules include numpy, pandas, math, json, datetime, time, collections, functools, itertools, statistics, decimal, fractions, and copy. Since <code>pd</code> and <code>np</code> are preloaded, imports are normally unnecessary.
+
+Do not use:
+
+- network, file, database, or subprocess access;
+- <code>eval</code>, <code>exec</code>, <code>compile</code>, or <code>open</code>;
+- reflection, dynamic imports, dunder escapes, or sandbox bypasses;
+- pandas/numpy file read, write, or serialization methods;
+- modules such as <code>os</code>, <code>sys</code>, <code>requests</code>, <code>socket</code>, <code>subprocess</code>, <code>threading</code>, <code>sqlite3</code>, <code>pathlib</code>, <code>pickle</code>, <code>ctypes</code>, or <code>operator</code>.
+
+Validation has a timeout. Avoid unbounded loops, explosive recursion, and unnecessarily expensive row-by-row algorithms.
+
+---
+
+## 13. Complete tutorial: dual EMA viewer
+
+~~~python
+# @param fast_len int 12 Fast EMA period range=5:30:1
+# @param slow_len int 26 Slow EMA period range=10:80:2
 # @param confirm_next_bar bool false Show markers one bar after confirmation
+# @param show_marks bool true Show crossover markers
 
 my_indicator_name = "Dual EMA Viewer"
-my_indicator_description = "Chart-only EMA crossover indicator with visual event markers."
+my_indicator_description = "Displays two EMAs and marks confirmed crossover events."
 
 df = df.copy()
 
 fast_len = int(params.get("fast_len", 12))
 slow_len = int(params.get("slow_len", 26))
 confirm_next_bar = bool(params.get("confirm_next_bar", False))
+show_marks = bool(params.get("show_marks", True))
 
 close = df["close"]
 high = df["high"]
 low = df["low"]
 
+
 def edge(condition):
-    s = condition.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
+    current = condition.fillna(False).astype(bool)
+    previous = current.shift(1, fill_value=False).astype(bool)
+    return current & ~previous
+
 
 def to_plot_list(series):
-    return [None if pd.isna(v) else float(v) for v in series]
+    return [
+        None if pd.isna(value) else float(value)
+        for value in series
+    ]
+
 
 ema_fast = close.ewm(span=fast_len, adjust=False).mean()
 ema_slow = close.ewm(span=slow_len, adjust=False).mean()
@@ -365,15 +530,20 @@ golden = edge(ema_fast > ema_slow)
 death = edge(ema_fast < ema_slow)
 
 if confirm_next_bar:
-    golden = golden.shift(1).fillna(False).astype(bool)
-    death = death.shift(1).fillna(False).astype(bool)
+    golden = golden.shift(1, fill_value=False).astype(bool)
+    death = death.shift(1, fill_value=False).astype(bool)
 
-buy_marks = [
-    float(low.iloc[i] * 0.995) if bool(golden.iloc[i]) else None
+golden_marks = [
+    float(low.iloc[i] * 0.995)
+    if show_marks and bool(golden.iloc[i])
+    else None
     for i in range(len(df))
 ]
-sell_marks = [
-    float(high.iloc[i] * 1.005) if bool(death.iloc[i]) else None
+
+death_marks = [
+    float(high.iloc[i] * 1.005)
+    if show_marks and bool(death.iloc[i])
+    else None
     for i in range(len(df))
 ]
 
@@ -383,64 +553,107 @@ output = {
         {
             "name": "EMA Fast",
             "data": to_plot_list(ema_fast),
-            "color": "#22c55e",
+            "color": "#22C55E",
             "type": "line",
             "overlay": True,
         },
         {
             "name": "EMA Slow",
             "data": to_plot_list(ema_slow),
-            "color": "#3b82f6",
+            "color": "#3B82F6",
             "type": "line",
             "overlay": True,
         },
     ],
     "signals": [
-        {"type": "buy", "text": "Golden", "color": "#22c55e", "data": buy_marks},
-        {"type": "sell", "text": "Death", "color": "#ef4444", "data": sell_marks},
+        {
+            "type": "buy",
+            "text": "Long Entry",
+            "color": "#22C55E",
+            "data": golden_marks,
+        },
+        {
+            "type": "sell",
+            "text": "Long Exit",
+            "color": "#EF4444",
+            "data": death_marks,
+        },
     ],
     "layers": [],
 }
-```
+~~~
+
+How it works:
+
+1. Parameter declarations drive the panel and candidate ranges.
+2. <code>params.get</code> reads exactly matching defaults.
+3. EMAs are persistent state, so they belong in plots.
+4. Crossovers are one-time events, so <code>edge</code> converts them into signals.
+5. Empty marker slots contain <code>None</code>.
+6. The bearish marker is explicitly named “Long Exit,” preventing an accidental short-entry interpretation during conversion.
 
 ---
 
-## 13. Before Converting an Indicator to a Strategy
+## 14. Validation, debugging, and common errors
 
-Check:
+Use this workflow after each meaningful change:
 
-- The indicator runs successfully and sets `output`.
-- Plot and signal arrays all have length `len(df)`.
-- Markers are events, not repeated state spam.
-- The meaning of `sell` / `Death` is clear: long exit or short entry.
-- Requirements for both-side trading, reversal, scale-in, scale-out, and risk controls are explicit.
-- The indicator contains no legacy execution columns or `# @strategy` annotations.
+1. Save a version.
+2. Run/preview the indicator.
+3. Execute code validation.
+4. Inspect warm-up bars, extreme markets, and short datasets.
+5. Change parameters and confirm that results respond.
+6. Confirm that signals appear only on event bars.
 
-Generated strategies must be backtested. A strategy cannot be published to the marketplace until it has at least one successful backtest record.
-
----
-
-## 14. Common Quality Hints
-
-| Hint | Meaning | Fix |
+| Hint or error | Cause | Fix |
 | --- | --- | --- |
-| `MISSING_OUTPUT` | `output` is missing | Add a complete output dict |
-| `MISSING_DF_COPY` | `df = df.copy()` is missing | Add it before calculations |
-| `MISSING_INDICATOR_NAME` | name metadata is missing | Add `my_indicator_name` |
-| `MISSING_INDICATOR_DESCRIPTION` | description metadata is missing | Add `my_indicator_description` |
-| `PARAM_DEFAULT_MISMATCH` | parameter defaults disagree | Align `# @param` and `params.get` |
-| `EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR` | execution columns were detected | Remove them; convert to strategy for execution |
-| `STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR` | strategy annotations were detected | Remove old `# @strategy` style annotations |
-| `NDARRAY_PANDAS_METHOD_MISUSE` | ndarray is used as Series | Use pandas-native ops or wrap with index |
+| <code>EMPTY_CODE</code> | no source | provide complete indicator code |
+| <code>MISSING_OUTPUT</code> | no output assignment | add the output dict |
+| <code>MissingOutput</code> | no output after execution | check branches and scope |
+| <code>InvalidOutputType</code> | output is not a dict | return a dict |
+| <code>InvalidOutputStructure</code> | neither plots nor signals exists | provide at least one key |
+| <code>LengthMismatch</code> | data length differs from bars | make every data list <code>len(df)</code> |
+| <code>MISSING_DF_COPY</code> | missing working copy | add <code>df = df.copy()</code> |
+| <code>PARAM_DEFAULT_MISMATCH</code> | declaration and fallback differ | align both defaults |
+| <code>DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET</code> | declared but not read | call <code>params.get</code> |
+| <code>EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR</code> | trade columns detected | remove them and convert to V2 |
+| <code>STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR</code> | legacy strategy annotations | remove them |
+| <code>NDARRAY_PANDAS_METHOD_MISUSE</code> | ndarray used as Series | use pandas or wrap with its index |
+| <code>FUTURE_DATA_LEAK</code> | future access detected | use current and past data only |
 
 ---
 
-## 15. Best Practices
+## 15. Semantic checklist before strategy conversion
 
-- Make the chart readable before converting to a strategy.
-- Indicators should not secretly trade; strategies should not pretend to be indicators.
-- Keep markers sparse and meaningful.
-- Use plots/lamp rows for persistent regimes.
-- Keep defaults conservative and reproducible.
-- Avoid future leaks: no `shift(-1)`, no `iloc[i + 1]`, no centered rolling.
-- Save versions before large rewrites.
+Answer these questions before converting:
+
+- Which marker is the long entry?
+- Which marker is the long exit?
+- Is shorting genuinely required? A bearish long exit is not automatically a short entry.
+- Is reversal required? If so, are closing and reverse entry separate actions?
+- On which timeframe and completed bar is the signal confirmed?
+- Are repeated entries, scale-in, or scale-out allowed?
+- How should sizing, stop-loss, take-profit, and trailing protection work?
+- Which instrument and market type will the strategy own?
+
+The converted strategy should remove chart-only colors, label offsets, plots, layers, and marker arrays. Preserve the signal algebra, then declare instruments, frequency, sizing, and risk explicitly with Strategy API V2.
+
+Always verify and backtest generated strategy code again. Marketplace publication requires at least one successful backtest record.
+
+---
+
+## 16. Pre-publication checklist
+
+- [ ] Name and description exist and make no return claims.
+- [ ] Comments, identifiers, metadata, and default labels are English.
+- [ ] <code>df = df.copy()</code> is present.
+- [ ] Every parameter is read through <code>params.get</code> with a matching default.
+- [ ] No order, position, leverage, or execution-risk logic is present.
+- [ ] <code>output</code> is a dict.
+- [ ] Every plot/signal data list has length <code>len(df)</code>.
+- [ ] Missing values are <code>None</code>; no NaN or infinity is emitted.
+- [ ] Signals are sparse events; persistent states use plots or a few layers.
+- [ ] No future data is accessed.
+- [ ] Numpy results are converted to indexed Series before pandas-only methods.
+- [ ] Short datasets, warm-up periods, and unusual parameters do not crash.
+- [ ] A version is saved and preview/validation passes.

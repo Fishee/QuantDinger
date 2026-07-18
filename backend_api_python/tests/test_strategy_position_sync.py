@@ -25,6 +25,24 @@ def test_strategy_allowed_symbols_includes_row_and_trading_config_symbol():
     assert "ETH/USDT" in allowed
 
 
+def test_strategy_allowed_symbols_uses_portfolio_manifest_universe():
+    sc = {
+        "symbol": "basket:2",
+        "trading_config": {
+            "strategy_manifest": {
+                "universe": {
+                    "instruments": [
+                        {"market": "USStock", "symbol": "AAPL"},
+                        {"market": "USStock", "symbol": "MSFT"},
+                    ]
+                }
+            }
+        },
+    }
+
+    assert strategy_allowed_symbols(sc) == {"AAPL", "MSFT"}
+
+
 def test_lookup_exchange_side_qty_symbol_aliases():
     exch = {"SOL/USDT": {"long": 1.5, "short": 0.0}}
     assert lookup_exchange_side_qty(exch, "SOLUSDT", "long") == 1.5

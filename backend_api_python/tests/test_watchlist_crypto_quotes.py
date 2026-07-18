@@ -38,7 +38,6 @@ def test_zero_quote_is_not_cached(monkeypatch):
         {"price": 123.45, "change": 0, "changePercent": 0, "source": "ticker"},
     ]
 
-    monkeypatch.setattr(quotes, "default_crypto_exchange_id", lambda: "okx")
     monkeypatch.setattr(
         quotes.kline_service,
         "get_realtime_price",
@@ -46,12 +45,130 @@ def test_zero_quote_is_not_cached(monkeypatch):
     )
     symbol = _unique_symbol()
 
-    first = quotes.get_single_price("Crypto", symbol)
-    second = quotes.get_single_price("Crypto", symbol)
+    first = quotes.get_single_price("USStock", symbol)
+    second = quotes.get_single_price("USStock", symbol)
 
     assert first["price"] == 0
     assert second["price"] == 123.45
     assert responses == []
+
+
+def test_crypto_catalog_skips_missing_spot_and_uses_same_exchange_swap(monkeypatch):
+    calls = []
+
+    def fake_realtime_price(market, symbol, **kwargs):
+        calls.append((market, symbol, kwargs))
+        return {
+            "price": 3456.78,
+            "change": 12.3,
+            "changePercent": 0.36,
+            "source": "ticker",
+        }
+
+    def fake_find_market_symbol(market, symbol, **kwargs):
+        if kwargs["market_type"] == "swap":
+            return {"market": market, "symbol": symbol, **kwargs}
+        return None
+
+    monkeypatch.setattr(quotes, "default_crypto_exchange_id", lambda: "okx")
+    monkeypatch.setattr(quotes, "find_market_symbol", fake_find_market_symbol)
+    monkeypatch.setattr(quotes.kline_service, "get_realtime_price", fake_realtime_price)
+
+    result = quotes.get_single_price("Crypto", "XAU/USDT")
+
+    assert result["price"] == 3456.78
+    assert result["exchange_id"] == ""
+    assert result["market_type"] == ""
+    assert result["source_exchange_id"] == "okx"
+    assert result["source_market_type"] == "swap"
+    assert [call[2]["market_type"] for call in calls] == ["swap"]
+    assert all(call[2]["exchange_id"] == "okx" for call in calls)
+
+
+def test_crypto_spot_runtime_miss_falls_back_to_swap(monkeypatch):
+    calls = []
+
+    def fake_realtime_price(market, symbol, **kwargs):
+        calls.append((market, symbol, kwargs))
+        if kwargs["market_type"] == "swap":
+            return {"price": 39.21, "source": "ticker"}
+        return {"price": 0, "source": "unknown"}
+
+    monkeypatch.setattr(quotes, "default_crypto_exchange_id", lambda: "okx")
+    monkeypatch.setattr(quotes, "find_market_symbol", lambda *args, **kwargs: None)
+    monkeypatch.setattr(quotes.kline_service, "get_realtime_price", fake_realtime_price)
+
+    result = quotes.get_single_price("Crypto", _unique_symbol())
+
+    assert result["price"] == 39.21
+    assert result["source_exchange_id"] == "okx"
+    assert result["source_market_type"] == "swap"
+    assert [call[2]["market_type"] for call in calls] == ["spot", "swap"]
+
+
+def test_regular_crypto_stays_spot_first_when_only_swap_is_cataloged(monkeypatch):
+    calls = []
+
+    def fake_realtime_price(market, symbol, **kwargs):
+        calls.append((market, symbol, kwargs))
+        return {"price": 64190.2, "source": "ticker"}
+
+    monkeypatch.setattr(quotes, "default_crypto_exchange_id", lambda: "okx")
+    monkeypatch.setattr(
+        quotes,
+        "find_market_symbol",
+        lambda market, symbol, **kwargs: {"market": market, "symbol": symbol, **kwargs},
+    )
+    monkeypatch.setattr(quotes.kline_service, "get_realtime_price", fake_realtime_price)
+
+    result = quotes.get_single_price("Crypto", "BTC/USDT")
+
+    assert result["price"] == 64190.2
+    assert result["source_market_type"] == "spot"
+    assert [call[2]["market_type"] for call in calls] == ["spot"]
+
+
+def test_non_crypto_zero_quote_does_not_try_swap(monkeypatch):
+    calls = []
+
+    def fake_realtime_price(market, symbol, **kwargs):
+        calls.append((market, symbol, kwargs))
+        return {"price": 0, "source": "unknown"}
+
+    monkeypatch.setattr(quotes.kline_service, "get_realtime_price", fake_realtime_price)
+
+    result = quotes.get_single_price("USStock", f"MSFT{uuid.uuid4().hex[:8]}")
+
+    assert result["price"] == 0
+    assert len(calls) == 1
+    assert calls[0][2]["exchange_id"] is None
+    assert calls[0][2]["market_type"] is None
+
+
+def test_crypto_price_map_resolves_default_exchange_before_workers(monkeypatch):
+    exchange_calls = []
+    quote_calls = []
+
+    def fake_default_exchange():
+        exchange_calls.append(True)
+        return "okx" if len(exchange_calls) == 1 else "binance"
+
+    def fake_realtime_price(market, symbol, **kwargs):
+        quote_calls.append((market, symbol, kwargs))
+        return {"price": 100.0, "source": "ticker"}
+
+    monkeypatch.setattr(quotes, "default_crypto_exchange_id", fake_default_exchange)
+    monkeypatch.setattr(quotes.kline_service, "get_realtime_price", fake_realtime_price)
+
+    results = quotes.get_price_map([
+        {"market": "Crypto", "symbol": _unique_symbol()},
+        {"market": "Crypto", "symbol": _unique_symbol()},
+    ])
+
+    assert len(results) == 2
+    assert len(exchange_calls) == 1
+    assert all(call[2]["exchange_id"] == "okx" for call in quote_calls)
+    assert all(result["exchange_id"] == "" for result in results)
 
 
 def test_request_guard_cache_predicate_skips_rejected_values():

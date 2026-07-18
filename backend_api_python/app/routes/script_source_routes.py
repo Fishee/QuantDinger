@@ -4,6 +4,11 @@ from flask import g, jsonify, request
 
 from app.routes.strategy_blueprint import strategy_blp
 from app.services.script_source import get_script_source_service
+from app.services.strategy_v2 import (
+    StrategyBacktestRepository,
+    canonical_source_metadata,
+    compile_strategy_v2,
+)
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
 
@@ -15,11 +20,25 @@ def _source_payload() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _attach_v2_manifest(payload: dict) -> dict:
+    code = str(payload.get("code") or "").strip()
+    if not code:
+        return payload
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    payload["metadata"], manifest = canonical_source_metadata(code, metadata)
+    payload["asset_type"] = (
+        "portfolio_strategy"
+        if manifest.get("strategyType") == "portfolio"
+        else "script"
+    )
+    return payload
+
+
 def _mask_hidden_source(item: dict | None) -> dict | None:
     if not isinstance(item, dict):
         return item
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    hidden = bool(metadata.get("code_hidden") or metadata.get("hide_code") or False)
+    hidden = bool(metadata.get("code_hidden"))
     if not hidden:
         return item
     out = dict(item)
@@ -32,7 +51,7 @@ def _is_hidden_source(item: dict | None) -> bool:
     if not isinstance(item, dict):
         return False
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    return bool(item.get("code_hidden") or metadata.get("code_hidden") or metadata.get("hide_code"))
+    return bool(item.get("code_hidden") or metadata.get("code_hidden"))
 
 
 def _mask_hidden_version(item: dict | None, *, hidden: bool) -> dict | None:
@@ -47,12 +66,9 @@ def _mask_hidden_version(item: dict | None, *, hidden: bool) -> dict | None:
 
 
 def _has_successful_script_backtest(user_id: int, source_id: int) -> bool:
-    from app.services.unified_backtest import UnifiedBacktestService
-    rows = UnifiedBacktestService().list_runs(
+    rows = StrategyBacktestRepository().list_runs(
         user_id=int(user_id),
-        asset_type="script",
-        asset_id=int(source_id),
-        status="success",
+        source_id=int(source_id),
         limit=1,
     )
     return bool(rows)
@@ -63,10 +79,10 @@ def _has_successful_script_backtest(user_id: int, source_id: int) -> bool:
 def list_script_templates():
     try:
         items = get_script_source_service().list_templates()
-        return jsonify({"code": 1, "msg": "success", "data": {"items": items, "templates": items}})
+        return jsonify({"code": 1, "msg": "success", "data": {"items": items}})
     except Exception as exc:
         logger.error("list_script_templates failed: %s", exc)
-        return jsonify({"code": 0, "msg": str(exc), "data": {"items": [], "templates": []}}), 500
+        return jsonify({"code": 0, "msg": str(exc), "data": {"items": []}}), 500
 
 
 @strategy_blp.route("/strategies/script-sources", methods=["GET"])
@@ -74,7 +90,7 @@ def list_script_templates():
 def list_script_sources():
     try:
         items = [_mask_hidden_source(item) for item in get_script_source_service().list_sources(g.user_id)]
-        return jsonify({"code": 1, "msg": "success", "data": {"items": items, "sources": items}})
+        return jsonify({"code": 1, "msg": "success", "data": {"items": items}})
     except Exception as exc:
         logger.error("list_script_sources failed: %s", exc)
         return jsonify({"code": 0, "msg": str(exc), "data": {"items": []}}), 500
@@ -84,7 +100,7 @@ def list_script_sources():
 @login_required
 def get_script_source_detail():
     try:
-        source_id = int(request.args.get("id") or request.args.get("sourceId") or 0)
+        source_id = int(request.args.get("id") or 0)
         if not source_id:
             return jsonify({"code": 0, "msg": "source id is required", "data": None}), 400
         item = _mask_hidden_source(get_script_source_service().get_source(source_id, user_id=g.user_id))
@@ -100,9 +116,9 @@ def get_script_source_detail():
 @login_required
 def create_script_source():
     try:
-        payload = _source_payload()
+        payload = _attach_v2_manifest(_source_payload())
         payload["user_id"] = g.user_id
-        if not str(payload.get("code") or payload.get("strategy_code") or "").strip():
+        if not str(payload.get("code") or "").strip():
             return jsonify({"code": 0, "msg": "script code is required", "data": None}), 400
         source_id = get_script_source_service().create_source(payload)
         item = _mask_hidden_source(get_script_source_service().get_source(source_id, user_id=g.user_id))
@@ -116,9 +132,8 @@ def create_script_source():
 @login_required
 def update_script_source():
     try:
-        source_id = int(request.args.get("id") or request.args.get("sourceId") or 0)
-        payload = _source_payload()
-        source_id = int(payload.get("id") or payload.get("sourceId") or source_id or 0)
+        source_id = int(request.args.get("id") or 0)
+        payload = _attach_v2_manifest(_source_payload())
         if not source_id:
             return jsonify({"code": 0, "msg": "source id is required", "data": None}), 400
         ok = get_script_source_service().update_source(source_id, g.user_id, payload)
@@ -131,12 +146,33 @@ def update_script_source():
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 500
 
 
+@strategy_blp.route("/strategies/script-sources/compile", methods=["POST"])
+@login_required
+def compile_script_source_v2():
+    try:
+        payload = _source_payload()
+        code = str(payload.get("code") or "").strip()
+        source_id = int(payload.get("sourceId") or 0)
+        if not code and source_id:
+            source = get_script_source_service().get_source(source_id, user_id=g.user_id)
+            code = str((source or {}).get("code") or "").strip()
+        if not code:
+            return jsonify({"code": 0, "msg": "strategyV2.codeRequired", "data": None}), 400
+        manifest = compile_strategy_v2(code).manifest.metadata()
+        return jsonify({"code": 1, "msg": "success", "data": {"manifest": manifest}})
+    except ValueError as exc:
+        return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
+    except Exception as exc:
+        logger.error("compile_script_source_v2 failed: %s", exc, exc_info=True)
+        return jsonify({"code": 0, "msg": "strategyV2.compileFailed", "data": None}), 500
+
+
 @strategy_blp.route("/strategies/script-sources/delete", methods=["DELETE", "POST"])
 @login_required
 def delete_script_source():
     try:
         payload = _source_payload()
-        source_id = int(payload.get("id") or payload.get("sourceId") or request.args.get("id") or 0)
+        source_id = int(request.args.get("id") or 0)
         if not source_id:
             return jsonify({"code": 0, "msg": "source id is required", "data": None}), 400
         ok = get_script_source_service().delete_source(source_id, g.user_id)
@@ -152,7 +188,7 @@ def delete_script_source():
 @login_required
 def list_script_source_versions():
     try:
-        source_id = int(request.args.get("sourceId") or request.args.get("source_id") or request.args.get("id") or 0)
+        source_id = int(request.args.get("sourceId") or 0)
         if not source_id:
             return jsonify({"code": 0, "msg": "source id is required", "data": []}), 400
         ok, rows = get_script_source_service().list_versions(source_id, g.user_id)
@@ -187,7 +223,7 @@ def get_script_source_version(version_id: int):
 def restore_script_source_version():
     try:
         payload = _source_payload()
-        version_id = int(payload.get("versionId") or payload.get("version_id") or 0)
+        version_id = int(payload.get("versionId") or 0)
         if not version_id:
             return jsonify({"code": 0, "msg": "version id is required", "data": None}), 400
         version = get_script_source_service().get_version(version_id, g.user_id)
@@ -215,17 +251,14 @@ def restore_script_source_version():
 def publish_script_source():
     try:
         payload = _source_payload()
-        source_id = int(payload.get("sourceId") or payload.get("source_id") or payload.get("id") or 0)
+        source_id = int(payload.get("sourceId") or 0)
         if not source_id:
             return jsonify({"code": 0, "msg": "source id is required", "data": None}), 400
         source = get_script_source_service().get_source(source_id, user_id=g.user_id)
         if not source:
             return jsonify({"code": 0, "msg": "script source not found", "data": None}), 404
 
-        from app.routes.strategy import _validate_strategy_code_internal
-        validation = _validate_strategy_code_internal(source.get("code") or "")
-        if not validation.get("success"):
-            return jsonify({"code": 0, "msg": validation.get("message") or "Code verification failed", "data": validation}), 400
+        compile_strategy_v2(str(source.get("code") or ""))
 
         if not _has_successful_script_backtest(g.user_id, source_id):
             return jsonify({
@@ -243,12 +276,12 @@ def publish_script_source():
             code=source.get("code") or "",
             name=(payload.get("name") or source.get("name") or "").strip(),
             description=(payload.get("description") or source.get("description") or "").strip(),
-            pricing_type=(payload.get("pricingType") or payload.get("pricing_type") or "free").strip() or "free",
+            pricing_type=(payload.get("pricingType") or "free").strip() or "free",
             price=payload.get("price") or 0,
-            vip_free=bool(payload.get("vipFree") or payload.get("vip_free") or False),
-            code_hidden=bool(payload.get("codeHidden") or payload.get("code_hidden") or payload.get("hideCode") or False),
+            vip_free=bool(payload.get("vipFree") or False),
+            code_hidden=bool(payload.get("codeHidden") or False),
             is_admin=is_admin,
-            existing_indicator_id=int(payload.get("indicatorId") or payload.get("indicator_id") or 0),
+            existing_indicator_id=int(payload.get("indicatorId") or 0),
             source_id=source_id,
         )
         if data is not None:

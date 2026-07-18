@@ -67,7 +67,7 @@ celery_app.conf.update(
         },
         "market-catalog-sync": {
             "task": "quantdinger.tasks.market_catalog_sync",
-            "schedule": max(900, int(os.getenv("MARKET_CATALOG_SYNC_INTERVAL_SEC", "21600"))),
+            "schedule": max(900, int(os.getenv("MARKET_CATALOG_SYNC_INTERVAL_SEC", "86400"))),
         },
         "celery-worker-heartbeat": {
             "task": "quantdinger.tasks.worker_heartbeat",

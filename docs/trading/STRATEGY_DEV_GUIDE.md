@@ -1,604 +1,689 @@
-# QuantDinger Strategy Development Guide
+# Strategy API V2 Development Guide
 
-This guide defines the current QuantDinger executable strategy contract. In this document, "strategy" means **ScriptStrategy**: Python code that can be backtested, run live, produce order intents, and pass marketplace review.
+> Applies to: the current executable QuantDinger strategy contract
+> Audience: first-time strategy authors, indicator-conversion users, and developers targeting both backtest and live execution
 
-If you only want to draw moving averages, lamps, zones, or visual markers, use the [Indicator Development Guide](./INDICATOR_DEV_GUIDE.md). Indicators cannot place orders or be backtested directly. To trade an indicator idea, convert it through the Indicator-to-Strategy workflow and validate the generated ScriptStrategy.
+QuantDinger has one current executable Python strategy contract: **Strategy API V2**. The same source compiles into a strategy manifest used by backtest and live runtimes for instruments, subscriptions, events, order intents, portfolio accounting, and protection rules.
 
----
+The source owns its market, instruments, frequency, schedules, and trading logic. Run forms provide dates, initial capital, costs, source-permitted leverage, and user parameters; they do not override source-controlled markets, symbols, or timeframes.
 
-## 1. AI Generation Entry Points
-
-QuantDinger currently has three core generation contracts:
-
-| Entry | Output | Boundary |
-| --- | --- | --- |
-| Indicator AI generation | Chart Indicator | produces `output` for chart display only |
-| Homepage strategy quick tool | ScriptStrategy | generates executable strategy code from an idea |
-| Indicator-to-Strategy | ScriptStrategy | translates visual indicator semantics into runtime order intents |
-
-Indicator-to-Strategy is not a copy-paste operation. It interprets visual signals and maps them into explicit strategy intents. For a long-only dual moving average indicator:
-
-- `Golden` / `buy` -> `open_long`
-- `Death` / `sell` -> `close_long`
-- not automatically `open_short`
-
-Short entries should appear only when the user explicitly asks for shorting, both-side trading, or reversal logic.
+Chart indicators are separate artifacts. Their plots, signals, and layers cannot place orders. Convert an indicator into Strategy API V2 before backtesting or deploying it.
 
 ---
 
-## 2. ScriptStrategy Shape
+## 1. Quick start: a minimal executable strategy
 
-Every strategy must include:
-
-```python
-"""
-Strategy Name
-One or two neutral sentences describing logic, markets, entries, exits, and risk controls.
+~~~python
+"""SPY 20-Day Moving Average
+Trades a long-only SPY regime from completed daily bars.
 """
 
-def on_init(ctx):
-    ...
-
-def on_bar(ctx, bar):
-    ...
-```
-
-Rules:
-
-- The first non-empty docstring line is the strategy name.
-- Following non-empty lines are the strategy description.
-- Do not expose name or description as `ctx.param(...)`.
-- `on_init(ctx)` initializes parameters and state.
-- `on_bar(ctx, bar)` runs once for each bar.
-
-`bar` supports:
-
-```python
-bar["open"]
-bar["high"]
-bar["low"]
-bar["close"]
-bar["volume"]
-bar["timestamp"]
-```
-
-### Optional Code Headers
-
-ScriptStrategy metadata has two layers:
-
-- The opening triple-quoted docstring owns the strategy name and description.
-- Optional `# key: value` headers can own a small number of runtime defaults.
-
-Recommended shape:
-
-```python
-"""
-EMA Pullback Long
-Trades long pullbacks in an EMA uptrend with optional stop and take-profit controls.
-"""
-# timeframe: 4H
-# signal_timing: next_bar_open
-# exit_owner: engine
-
-def on_init(ctx):
-    ...
-```
-
-Supported headers:
-
-| Header | Values | Meaning |
-| --- | --- | --- |
-| `# timeframe: 1D` | `1m`, `3m`, `5m`, `15m`, `30m`, `1H`, `4H`, `1D`, `1W` | Code-owned default K-line period. Overrides saved panel config in backtests/live snapshots. |
-| `# kline_timeframe: 1D` | same as `timeframe` | Alias for `timeframe`. |
-| `# signal_timing: next_bar_open` | `next_bar_open`, `same_bar_close` | Execution timing. `next_bar_open` is the default and recommended. |
-| `# exit_owner: engine` | `engine`, `strategy`, `indicator` | Whether server-side risk exits can close positions. Use `engine` or omit it for engine-managed `# @strategy` risk annotations; `strategy` is accepted for historical templates and currently still allows engine risk; only `indicator` disables server-side price exits. |
-
-Rules:
-
-- Do not put symbol, market, direction, investment amount, or leverage in headers; those belong to the run panel.
-- Do not write these headers casually. If absent, the run panel and saved strategy config decide.
-- Prefer `next_bar_open`. Do not create manual `pending_signal` state only to delay execution by one bar.
-- `same_bar_close` is more optimistic and should be used only when explicitly requested.
-- `signal_form` and `flip_mode` are legacy indicator-conversion headers. New ScriptStrategy code should not rely on them.
-
-### Code-Owned Risk Annotations
-
-`# @strategy ...` annotations are still supported for ScriptStrategy code. They are not chart-indicator syntax and they are not `ctx.param(...)` UI knobs. They declare code-owned backtest/live risk defaults that the snapshot resolver passes into the execution engine.
-
-Example:
-
-```python
-# @strategy entryPct 1
-# @strategy stopLossPct 0.04
-# @strategy takeProfitPct 0.08
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.015
-# @strategy trailingActivationPct 0.03
-# @strategy maxHoldingBars 12
-# exit_owner: engine
-```
-
-Supported annotations:
-
-| Annotation | Value | Meaning |
-| --- | --- | --- |
-| `# @strategy entryPct 1` | `0.01` to `1` | Fraction of the run-panel investment amount used per entry. `1` means 100%. |
-| `# @strategy stopLossPct 0.04` | `0` to `1` | Server-side stop-loss ratio. `0.04` means 4%. |
-| `# @strategy takeProfitPct 0.08` | `0` to `5` | Server-side take-profit ratio. `0.08` means 8%. |
-| `# @strategy trailingEnabled true` | `true` / `false` | Enables trailing-stop logic when paired with trailing values. |
-| `# @strategy trailingStopPct 0.015` | `0` to `1` | Trailing distance ratio. `0.015` means 1.5%. |
-| `# @strategy trailingActivationPct 0.03` | `0` to `1` | Profit ratio required before trailing stop activates. |
-| `# @strategy maxHoldingBars 12` | integer `>= 0` | Maximum holding bars before engine-managed exit. `0` disables it. |
-
-Rules:
-
-- Use these annotations only when risk should be owned by the code itself.
-- All percentage-like values are ratios, not whole percentages: write `0.04` for 4%, not `4`.
-- These values are read by backtests and live snapshots. If they are absent, engine-managed risk defaults to off except entry sizing.
-- `exit_owner: engine` allows engine-managed stops, take-profits, trailing stops, and max-holding exits to close positions.
-- `exit_owner: strategy` is a historical template value; the current runtime does not treat it as "disable engine risk". New templates should prefer `engine` or omit the header.
-- `exit_owner: indicator` is an advanced compatibility switch for the old indicator-conversion path. It means exits are fully owned by code-generated `close_*` intents and server-side price exits should not close positions.
-- If the script implements its own hard stop, take-profit, trailing exit, or staged exits, do not also write equivalent `@strategy` risk annotations.
-- Grid, DCA, and martingale are delivered as Trading Robots while still producing editable standard strategy code. DCA and martingale express their state machines in `on_bar`; grid declares its configuration through `ctx.configure_robot(...)` in `on_init`, while the host supplies durable resting orders, fill polling, and reconciliation.
-- Do not put these annotations in chart-only indicators.
-
----
-
-## 3. Product Panel vs Strategy Code
-
-The run panel owns:
-
-- symbol / market
-- spot or swap
-- trade direction: long / short / both
-- investment amount
-- leverage
-- account, notification, and live-risk switches
-
-Strategy code owns:
-
-- entry, exit, scale-in, scale-out conditions
-- periods, thresholds, multipliers, layer counts, cooldowns
-- state persistence and duplicate-order protection
-- logs, basket checkpoints, and strategy-specific risk logic
-
-Do not declare run-panel fields as parameters:
-
-```python
-# Wrong
-ctx.direction = ctx.param("direction", "long")
-ctx.market_type = ctx.param("market_type", "swap")
-ctx.investment_amount = ctx.param("investment_amount", 1000)
-ctx.leverage = ctx.param("leverage", 3)
-ctx.base_notional = ctx.param("base_notional", 50)
-```
-
-Read runtime context instead:
-
-```python
-direction = ctx.direction
-market_type = ctx.market_type
-budget = float(ctx.investment_amount or 0)
-leverage = float(ctx.leverage or 1)
-```
-
-### Backtest and Live Runtime Model
-
-The professional strategy path is:
-
-```text
-ScriptStrategy Code
-    -> ScriptBacktestRunner
-    -> BacktestContext
-    -> BrokerSimulator
-    -> Trades / Equity Curve / Audit / Replay
-```
-
-In backtests, strategy code runs once per K-line bar. With the default `signal_timing: next_bar_open`, an order created from confirmed bar N is submitted to the broker at bar N+1 open. The broker immediately updates cash, margin, positions, fees, slippage, and equity; the next bar sees the latest account state.
-
-Live trading has two clocks:
-
-- Price tick: normal script strategies sync latest price about every 10 seconds by default for server-side stop-loss, take-profit, trailing stop, order status, and notifications. Override with `STRATEGY_TICK_INTERVAL_SEC`.
-- K-line signal clock: strict mode is on by default. Signals are calculated only after a new strategy-timeframe bar has closed. The scheduler polls near the natural timeframe boundary plus about 2 seconds by default, controlled by `KLINE_BOUNDARY_POLL_OFFSET_SEC`.
-
-For example, if a user starts a 1H strategy at 10:20, the runtime loads historical bars immediately; the next new closed-bar signal check happens around 11:00:02, not 11:20.
-
-Strict mode means:
-
-- Signals are confirmed on closed bars to stay close to backtest semantics.
-- Stop-loss, take-profit, and trailing stop checks use the latest price tick and do not wait for bar close.
-- Normal script strategies have same-candle de-duplication and a signal state machine to avoid repeated open/stop/re-open loops on one K-line.
-- Non-strict mode updates the forming bar with current price and may evaluate more often. It is faster, but may diverge from backtests and should be used only when the user explicitly wants intrabar triggering.
-
-### Core Context API
-
-Strategy code should rely only on these core context capabilities:
-
-| Category | API |
-| --- | --- |
-| Time and market | `ctx.current_dt`, `ctx.symbol`, `ctx.market_type`, `ctx.direction`, `ctx.leverage` |
-| Account | `ctx.initial_capital`, `ctx.equity`, `ctx.available_cash`, `ctx.available_margin` |
-| Positions | `ctx.position`, `ctx.positions` |
-| Data | `ctx.bars(count)` |
-| Parameters and state | `ctx.param(name, default)`, `ctx.state.get(name)`, `ctx.state.set(name, value)` |
-| Orders | `ctx.open_long(...)`, `ctx.close_long(...)`, `ctx.open_short(...)`, `ctx.close_short(...)`, `ctx.order_value(...)`, `ctx.order_target(...)` |
-| Diagnostics | `ctx.log(...)` |
-
----
-
-## 4. Parameters
-
-Declare strategy knobs in `on_init(ctx)`:
-
-```python
-def on_init(ctx):
-    ctx.fast_period = ctx.param("fast_period", 12)
-    ctx.slow_period = ctx.param("slow_period", 36)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 0)
-    ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-    ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-```
-
-Rules:
-
-- Every `ctx.param` call must have a default.
-- Do not repeatedly call `ctx.param` inside `on_bar`.
-- Only strategy knobs belong here; symbol, direction, budget, and leverage do not.
-- `*_pct` values use ratios: `0.02 = 2%`, `0.8 = 80%`.
-- If the user did not request risk controls, default them to `0` or off.
-
----
-
-## 5. Explicit Order Intents
-
-QuantDinger uses explicit intents:
-
-| Intent | Meaning |
-| --- | --- |
-| `open_long` | open or create a long leg |
-| `close_long` | close the long leg only; does not open short |
-| `open_short` | open or create a short leg |
-| `close_short` | close the short leg only; does not open long |
-| `add_long` | increase an existing long leg |
-| `add_short` | increase an existing short leg |
-| `reduce_long` | partially reduce a long leg |
-| `reduce_short` | partially reduce a short leg |
-
-Reversal must be two explicit actions:
-
-```text
-close_long -> open_short
-close_short -> open_long
-```
-
-Only generate reversal/flip logic when the user explicitly asks for it. Do not interpret `sell`, `close_long`, or `Death` as `open_short` by default.
-
----
-
-## 6. Basket API
-
-New strategies should prefer baskets when sizing by quote currency. `notional` means quote currency amount, such as USDT.
-
-Hard rules:
-
-- `ctx.basket(side)` accepts only `"long"` or `"short"`.
-- If the runtime object exposes `ctx.side`, it must also contain only `"long"` or `"short"`. Do not use `"open"`, `"close"`, `"buy"`, `"sell"`, or `"both"` as a side value.
-- Never use `"buy"` or `"sell"` as basket side.
-- `open_child_order(...)` must include `layer=` and `order=` every time.
-- Valid actions are `"open"`, `"add"`, `"reduce"`, and `"close"`.
-
-Mapping:
-
-| side | action | strategy intent |
-| --- | --- | --- |
-| long | open | `open_long` |
-| long | add | `add_long` |
-| long | reduce | `reduce_long` |
-| long | close | `close_long` |
-| short | open | `open_short` |
-| short | add | `add_short` |
-| short | reduce | `reduce_short` |
-| short | close | `close_short` |
-
-Example:
-
-```python
-ctx.basket("long").open_child_order(
-    layer=1,
-    order=1,
-    notional=quote_amount,
-    price=price,
-    action="open",
-    payload={"reason": "golden_cross"},
-)
-
-ctx.basket("long").open_child_order(
-    layer=1,
-    order=2,
-    notional=quote_amount,
-    price=price,
-    action="close",
-    payload={"reason": "death_cross"},
-)
-```
-
----
-
-## 7. Direct Order API
-
-Direct intent helpers are useful for simple strategies:
-
-```python
-ctx.open_long(price=price, amount=base_qty, reason="entry")
-ctx.add_long(price=price, amount=base_qty, reason="scale_in")
-ctx.reduce_long(price=price, amount=base_qty, reason="partial_exit")
-ctx.close_long(price=price, reason="exit")
-
-ctx.open_short(price=price, amount=base_qty, reason="entry")
-ctx.add_short(price=price, amount=base_qty, reason="scale_in")
-ctx.reduce_short(price=price, amount=base_qty, reason="partial_exit")
-ctx.close_short(price=price, reason="exit")
-
-ctx.order_value(side="long", value=quote_amount, reason="budget_entry")
-ctx.order_target(side="long", target_value=target_quote_amount, reason="rebalance")
-```
-
-Important:
-
-- Direct `amount` is base quantity, not quote notional.
-- `ctx.order_value(...)` orders by quote-currency value and is suitable for budget-based entries.
-- `ctx.order_target(...)` moves a side toward a target quote-currency exposure and is suitable for rebalancing.
-- Prefer basket `notional` for budget-based entries.
-- `ctx.buy()` and `ctx.sell()` are simple directional helpers and should not be used for scale-in, reversal, or complex scripts.
-- AI-generated strategies should avoid generic buy/sell auto semantics.
-
----
-
-## 8. State Management
-
-Strategies with cooldowns, layers, scale-ins, exits, or re-entry limits must use `ctx.state`.
-
-Common state fields:
-
-```python
-ctx.state.set("bar_index", current_bar)
-ctx.state.set("last_order_bar", current_bar)
-ctx.state.set("entry_price", price)
-ctx.state.set("layer", 1)
-ctx.state.set("pending_entry", False)
-ctx.state.set("cooldown_until", current_bar + ctx.cooldown_bars)
-```
-
-Duplicate-order protection:
-
-```python
-bar_index = int(ctx.state.get("bar_index", -1) or -1) + 1
-ctx.state.set("bar_index", bar_index)
-
-last_order_bar = int(ctx.state.get("last_order_bar", -999999) or -999999)
-if last_order_bar == bar_index:
-    return
-
-# issue order...
-ctx.state.set("last_order_bar", bar_index)
-```
-
-Do not put all logic behind:
-
-```python
-if ctx.position.is_flat():
-    ...
-    return
-```
-
-If a strategy supports scale-in, add/reduce/close logic must still run after a same-side position exists.
-
----
-
-## 9. Spot and Swap Rules
-
-Spot:
-
-- long only
-- leverage fixed to 1
-- short intents are rejected
-
-Swap:
-
-- long, short, and both-side modes are supported
-- leverage, funding, slippage, and fees come from runtime/backtest config
-
-The script may read `ctx.market_type` and `ctx.direction` for guards, but should not hard-code them as parameters.
-
----
-
-## 10. Risk Controls
-
-If the user did not request risk controls, default them off:
-
-```python
-ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-```
-
-Simple long stop/take-profit pattern:
-
-```python
-entry_price = float(ctx.state.get("entry_price", 0.0) or 0.0)
-if entry_price > 0 and ctx.position.has_long():
-    if ctx.stop_loss_pct > 0 and price <= entry_price * (1.0 - ctx.stop_loss_pct):
-        ctx.basket("long").open_child_order(
-            layer=1,
-            order=99,
-            notional=0,
-            price=price,
-            action="close",
-            payload={"reason": "stop_loss"},
+# @param period int 20 Moving-average period range=5:100:5
+# @param target_pct float 0.95 Target portfolio weight range=0.1:1.0:0.05
+
+
+def initialize(context):
+    g.symbol = "USStock:SPY"
+    context.set_universe([g.symbol])
+    context.subscribe(
+        frequency="1d",
+        fields=["open", "high", "low", "close", "volume"],
+    )
+    context.set_warmup(120)
+    context.set_benchmark("USStock:SPY")
+
+
+def handle_data(context, data):
+    period = int(context.params.get("period", 20))
+    target_pct = float(context.params.get("target_pct", 0.95))
+
+    bars = get_history(
+        period + 1,
+        "1d",
+        "close",
+        g.symbol,
+    )
+    if len(bars) < period:
+        return
+
+    price = float(bars["close"].iloc[-1])
+    average = float(bars["close"].tail(period).mean())
+    position = get_position(g.symbol)
+    desired = target_pct if price > average else 0.0
+
+    if desired > 0 and position.amount <= 0:
+        order_target_percent(
+            g.symbol,
+            desired,
+            reason="ma_long_entry",
+            stop_loss_pct=0.05,
         )
-        ctx.state.set("last_order_bar", bar_index)
-        return
-```
+    elif desired == 0 and position.amount > 0:
+        order_target_percent(
+            g.symbol,
+            0.0,
+            reason="ma_long_exit",
+        )
+~~~
 
-Trailing exits, partial take-profits, and break-even stops require explicit state fields and duplicate-order guards.
+Workflow:
+
+1. Create a script in the Strategy IDE and paste the source.
+2. Save the source.
+3. Verify it and inspect the compiled manifest.
+4. Choose dates, capital, commission, slippage, and parameters.
+5. Inspect executions, closed trades, the order ledger, equity, and holdings.
+6. Create a deployment only after the backtest behaves as intended. New deployments start stopped.
 
 ---
 
-## 11. Indicator-to-Strategy Rules
+## 2. Compiler requirements and authoring standard
 
-Conversion must preserve the indicator's visual signal meaning:
+Hard compiler requirements:
 
-| Indicator visual signal | Default strategy meaning |
+- Source is non-empty and executes in the safe sandbox.
+- <code>initialize(context)</code> exists.
+- <code>initialize</code> declares a static universe, index, or named pool through <code>context.set_universe(...)</code>.
+- If no subscription is declared, the compiler adds a default daily subscription; this guide still recommends an explicit <code>context.subscribe</code>.
+- The source exposes <code>handle_data</code>, <code>on_rebalance</code>, or at least one registered schedule callback.
+- Leveraged strategies satisfy the Crypto-swap-only policy.
+
+The project authoring standard additionally requires:
+
+- Start with a triple-quoted docstring. Its first line is the strategy name; following lines describe universe, signals, schedule, and risk.
+- Use English identifiers and source comments.
+- Use stable, auditable parameter and reason names.
+- Avoid look-ahead, implicit reversals, unbounded scaling, and uncapped exposure.
+
+<code>initialize</code> runs during compilation/manifest discovery. Use it for declarations and initial <code>g</code> state. Do not request market data, inspect real positions, or place orders there.
+
+---
+
+## 3. The source-owned manifest
+
+Compilation discovers:
+
+- API version and source hash;
+- CTA or portfolio classification;
+- static or dynamic universe;
+- subscribed instruments, frequency, and fields;
+- schedules;
+- benchmark;
+- lifecycle handlers;
+- factor and fundamental dependencies;
+- warm-up bars;
+- leverage permission and maximum;
+- custom metadata.
+
+Verification endpoint:
+
+~~~http
+POST /api/strategies/verify
+Content-Type: application/json
+
+{"code": "...complete Strategy API V2 source..."}
+~~~
+
+A valid response contains <code>valid: true</code> and the manifest. Verify the final saved source before deployment, not only an earlier draft.
+
+---
+
+## 4. Canonical instruments
+
+| Market | Example |
 | --- | --- |
-| `buy` / `Golden` / `Bullish` | `open_long` in long-only mode |
-| `sell` / `Death` / `Bearish exit` | `close_long` in long-only mode |
-| explicit bearish short entry | may become `open_short` |
-| explicit reversal request | close first, then open opposite |
-| explicit add/reduce request | use `add_*` / `reduce_*` or basket action |
+| China A-share | <code>CNStock:600519.SH</code> |
+| US equity | <code>USStock:MSFT</code> |
+| Hong Kong equity | <code>HKStock:00700.HK</code> |
+| Crypto spot | <code>Crypto:BTC/USDT@spot</code> |
+| Venue-specific Crypto spot | <code>Crypto:BTC/USDT@okx:spot</code> |
+| Crypto perpetual | <code>Crypto:BTC/USDT@swap</code> |
+| Venue-specific perpetual | <code>Crypto:BTC/USDT@okx:swap</code> |
 
-Do not:
+The parser also normalizes selected aliases, such as <code>600519.XSHG</code> to <code>CNStock:600519.SH</code> and <code>BTCUSDT</code> to <code>BTC/USDT</code>.
 
-- copy indicator `output` into strategy code
-- turn `sell` directly into a short entry
-- use `ctx.basket("buy")` or `ctx.basket("sell")`
-- omit `layer=` / `order=`
-- silently add grid, DCA, martingale, layers, active TP/SL, or reversal behavior
+Production strategies should use the full market prefix. Crypto defaults to spot when no market type is present. Only swap instruments can permit contract leverage.
 
 ---
 
-## 12. Full Example: EMA Long-Only Strategy
+## 5. Static and dynamic universes
 
-```python
+Static single instrument:
+
+~~~python
+context.set_universe(["USStock:SPY"])
+~~~
+
+Static basket:
+
+~~~python
+context.set_universe([
+    "USStock:AAPL",
+    "USStock:MSFT",
+    "USStock:NVDA",
+])
+~~~
+
+Index universe:
+
+~~~python
+context.set_universe(index="INDEX:SP500")
+members = get_index_stocks("INDEX:SP500")
+~~~
+
+Named platform pool:
+
+~~~python
+context.set_universe(pool="sp500")
+members = get_universe_stocks()
+~~~
+
+Dynamic universes resolve point-in-time constituents. Do not copy today's pool members into source and then use them for a historical backtest.
+
+A dynamic universe, more than one static instrument, or <code>on_rebalance</code> normally classifies the manifest as portfolio. One static instrument normally classifies it as CTA.
+
+---
+
+## 6. Subscriptions, warm-up, and benchmark
+
+~~~python
+context.subscribe(
+    frequency="1d",
+    fields=["open", "high", "low", "close", "volume"],
+)
+context.set_warmup(260)
+context.set_benchmark("USStock:SPY")
+~~~
+
+Rules:
+
+- Frequency belongs in source, for example <code>1m</code>, <code>5m</code>, <code>1h</code>, <code>4h</code>, <code>1d</code>, or <code>1w</code>.
+- Aliases such as <code>daily</code>, <code>day</code>, and <code>d</code> normalize to <code>1d</code>.
+- Omitting symbols subscribes the current universe.
+- <code>set_warmup</code> asks the data service for history before the requested backtest start. It does not remove the need for <code>len(bars)</code> guards.
+- A benchmark is for comparison; it is not traded automatically.
+- The <code>get_history</code> frequency argument is API-compatible metadata. The current runtime reads subscribed frames, so request the same frequency the source subscribes.
+
+---
+
+## 7. Lifecycle and schedules
+
+Supported handlers:
+
+~~~python
+def initialize(context):
+    pass
+
+def before_trading_start(context, data):
+    pass
+
+def handle_data(context, data):
+    pass
+
+def on_rebalance(context, panel):
+    pass
+
+def after_trading_end(context, data):
+    pass
+~~~
+
+Schedule registration:
+
+~~~python
+def initialize(context):
+    context.set_universe(["USStock:SPY"])
+    context.subscribe(frequency="5m")
+    run_daily(rebalance, time="09:35")
+    run_weekly(weekly_review, weekday=1, time="09:40")
+    run_monthly(monthly_rebalance, monthday=1, time="09:45")
+~~~
+
+Rules:
+
+- <code>weekday</code> is 1–7, with Monday as 1.
+- A monthday past the end of a month resolves to that month's last day.
+- On daily or lower-frequency bars, a specific intraday time does not create a nonexistent bar.
+- Prefer <code>callback(context, data)</code>; the runtime also adapts callbacks that accept only context.
+- A portfolio strategy with no registered schedules invokes <code>on_rebalance</code>.
+- The current engine invokes <code>before_trading_start</code> and <code>after_trading_end</code> for every event timestamp. Do not assume they run only once per calendar day in an intraday strategy.
+
+---
+
+## 8. The critical timing model
+
+Backtests expose only point-in-time-visible data:
+
+1. At a new bar, orders queued after the previous close execute first, using the current open.
+2. <code>before_trading_start</code> and due schedule callbacks see data only through the previous bar; their orders can be processed at the current open.
+3. The current completed bar becomes visible and <code>handle_data</code> runs.
+4. Orders emitted by <code>handle_data</code> wait for the next bar open.
+5. <code>after_trading_end</code> also sees the current bar; its new orders wait for the next bar.
+
+This implements “confirm on close, fill at next open” without future leakage. Never use negative shifts or future rows to move execution earlier.
+
+Live sessions process each closed bar once and preserve <code>g</code> state. Receiving the same bar twice should not duplicate strategy work.
+
+---
+
+## 9. context, data, and g
+
+Common context fields:
+
+| Field | Meaning |
+| --- | --- |
+| <code>context.params</code> | run parameters |
+| <code>context.current_dt</code> | current event timestamp |
+| <code>context.previous_trading_date</code> | previous event timestamp |
+| <code>context.portfolio.starting_cash</code> | initial capital |
+| <code>context.portfolio.available_cash</code> | available cash |
+| <code>context.portfolio.total_value</code> | current equity |
+| <code>context.portfolio.positions</code> | current position map |
+| <code>context.data</code> | data view |
+
+Use <code>data.current(symbol, field)</code> for a current visible value, <code>data.history(symbols, count, fields)</code> for history, and <code>data[symbol]</code> for its current visible DataFrame.
+
+Persist state across callbacks on <code>g</code>:
+
+~~~python
+def initialize(context):
+    g.last_signal = ""
+    g.rebalance_count = 0
+~~~
+
+Do not store strategy state in files, databases, or external module services. <code>g</code> is the per-run user state namespace.
+
+---
+
+## 10. Parameters
+
+~~~python
+# @param fast_period int 20 Fast moving-average period range=2:100:1
+# @param slow_period int 50 Slow moving-average period range=3:250:1
+# @param target_pct float 0.95 Target weight values=0.5,0.75,0.95
+# @param enabled bool true Enable entries
+~~~
+
+Read values through context:
+
+~~~python
+fast_period = int(context.params.get("fast_period", 20))
+slow_period = int(context.params.get("slow_period", 50))
+target_pct = float(context.params.get("target_pct", 0.95))
+enabled = bool(context.params.get("enabled", True))
+~~~
+
+Declared defaults and code fallbacks must agree. The parameter panel supplies <code>context.params</code>; the fallback remains the final default when a value is absent.
+
+Symbols, market, timeframe, and leverage permission are source contract fields. Do not disguise them as ordinary run-form overrides.
+
+---
+
+## 11. History, factors, and fundamentals
+
+Single-instrument history:
+
+~~~python
+bars = get_history(
+    60,
+    "1d",
+    ["open", "high", "low", "close", "volume"],
+    "USStock:SPY",
+)
+~~~
+
+One instrument returns a DataFrame. Multiple instruments return a dict of canonical instrument keys to DataFrames:
+
+~~~python
+frames = data.history(
+    ["USStock:AAPL", "USStock:MSFT"],
+    count=30,
+    fields=["close", "volume"],
+)
+~~~
+
+Technical indicators and factors:
+
+~~~python
+rsi_value = factor("rsi", g.symbol, period=14)
+macd = indicator("MACD", g.symbol, fastperiod=12, slowperiod=26, signalperiod=9)
+scores = get_factors(symbols, ["momentum_20", "volatility_20"])
+~~~
+
+Fundamentals:
+
+~~~python
+fundamentals = get_fundamentals(
+    ["PE", "PB", "ROE", "MARKET_CAP"],
+    symbols,
+)
+~~~
+
+Other public aliases include <code>REVENUE_GROWTH</code>, <code>DEBT_TO_EQUITY</code>, and <code>FREE_CASH_FLOW</code>. Use only real point-in-time fields supported by the platform; do not invent fields or read future reports.
+
+Pass a symbol to <code>factor</code>/<code>indicator</code> in a multi-asset strategy. The symbol may be omitted only when the data portal has exactly one instrument.
+
+---
+
+## 12. Positions and order APIs
+
+Read positions:
+
+~~~python
+position = get_position(g.symbol)
+all_positions = get_positions()
+~~~
+
+Common Position fields:
+
+- <code>symbol</code>
+- <code>amount</code>
+- <code>avg_cost</code>
+- <code>last_price</code>
+- <code>market_value</code>
+
+Order functions:
+
+| Function | Meaning |
+| --- | --- |
+| <code>order(symbol, amount)</code> | add/subtract a quantity |
+| <code>order_value(symbol, value)</code> | add/subtract quote-currency value |
+| <code>order_target(symbol, amount)</code> | set a target quantity |
+| <code>order_target_value(symbol, value)</code> | set a target quote value |
+| <code>order_target_percent(symbol, percent)</code> | set a target share of portfolio equity |
+
+Target APIs are usually best for repeatable rebalancing. Give every order a stable reason:
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.5,
+    reason="breakout_long_entry",
+)
+~~~
+
+Write spot and all non-Crypto markets as long-only under the current product policy. A long exit and a short entry are independent; do not turn a zero target into a negative position automatically.
+
+The engine accounts for commission, slippage, lot size, liquidity caps, price limits, and suspensions. Deferred and rejected requests appear in the order audit ledger. “No fill” does not necessarily mean “no signal.”
+
+---
+
+## 13. Stop, take-profit, trailing, and time protection
+
+Attach protection to an entry:
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.8,
+    reason="breakout_long_entry",
+    stop_loss_pct=0.03,
+    take_profit_pct=0.08,
+    trailing_stop_pct=0.025,
+    trailing_activation_pct=0.02,
+    time_limit_seconds=86400 * 10,
+)
+~~~
+
+Or set defaults for later entries:
+
+~~~python
+set_default_protection(
+    stop_loss_pct=0.03,
+    take_profit_pct=0.08,
+)
+~~~
+
+Percentage fields are ratios: <code>0.03</code> means 3%. Values are clamped to safe ranges, and negatives become zero.
+
+Backtest behavior:
+
+- A gap through a protection threshold fills at the available bar open.
+- An intrabar touch fills at the trigger price.
+- If several protections trigger in one bar, conservative mode prioritizes stop-loss, trailing stop, time limit, then take-profit.
+
+Live execution checks the same protection semantics on an independent price clock instead of waiting for the next strategy bar. Protection state can be persisted and restored after a session restart.
+
+---
+
+## 14. Leverage and shorting
+
+Only a static universe consisting entirely of Crypto swap instruments may declare:
+
+~~~python
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT@okx:swap"
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1h")
+    context.allow_leverage(max_leverage=5)
+~~~
+
+Rules:
+
+- Do not call <code>allow_leverage</code> for Crypto spot, equities, index/pool universes, or non-Crypto markets.
+- Dynamic universes cannot enable contract leverage.
+- Backtest/deployment leverage cannot exceed the source maximum.
+- A run form cannot force leverage on when the source has not permitted it.
+- The runtime applies the selected leverage; do not multiply order sizing by leverage again.
+- Shorting belongs only in swap strategies and requires independent short-entry, short-exit, and risk rules.
+
+---
+
+## 15. Complete CTA tutorial: dual EMA trend
+
+~~~python
+"""Dual EMA Long Trend
+Trades a long-only daily SPY trend with a protected entry and next-open fills.
 """
-Dual EMA Long Strategy
-Long-only EMA crossover strategy. Golden crosses open a long position, death crosses close the long position, and optional stop/take-profit defaults are off.
+
+# @param fast_period int 20 Fast EMA period range=5:80:5
+# @param slow_period int 50 Slow EMA period range=20:250:10
+# @param target_pct float 0.95 Target portfolio weight range=0.1:1.0:0.05
+# @param stop_loss_pct float 0.05 Entry stop-loss ratio range=0.01:0.15:0.01
+
+
+def initialize(context):
+    g.symbol = "USStock:SPY"
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1d")
+    context.set_warmup(300)
+    context.set_benchmark("USStock:SPY")
+
+
+def handle_data(context, data):
+    fast_period = int(context.params.get("fast_period", 20))
+    slow_period = int(context.params.get("slow_period", 50))
+    target_pct = float(context.params.get("target_pct", 0.95))
+    stop_loss_pct = float(context.params.get("stop_loss_pct", 0.05))
+
+    if fast_period >= slow_period:
+        log.warning("fast_period must be smaller than slow_period")
+        return
+
+    bars = get_history(
+        slow_period + 2,
+        "1d",
+        "close",
+        g.symbol,
+    )
+    if len(bars) < slow_period + 1:
+        return
+
+    close = bars["close"]
+    fast_now = float(close.ewm(span=fast_period, adjust=False).mean().iloc[-1])
+    slow_now = float(close.ewm(span=slow_period, adjust=False).mean().iloc[-1])
+    position = get_position(g.symbol)
+
+    if fast_now > slow_now and position.amount <= 0:
+        order_target_percent(
+            g.symbol,
+            target_pct,
+            reason="dual_ema_long_entry",
+            stop_loss_pct=stop_loss_pct,
+        )
+    elif fast_now < slow_now and position.amount > 0:
+        order_target_percent(
+            g.symbol,
+            0.0,
+            reason="dual_ema_long_exit",
+        )
+~~~
+
+Why it is structured this way:
+
+- Universe, frequency, and benchmark live in source.
+- Warm-up covers the slow EMA, while runtime length is still checked.
+- Invalid fast/slow combinations stop the current event.
+- Entry and exit are exclusive; the bearish condition exits a long but does not short.
+- A completed daily bar emits an order for the next open.
+- Protection is attached to the entry; the exit targets zero.
+
+---
+
+## 16. Portfolio tutorial: weekly factor rebalance
+
+~~~python
+"""S&P 500 Momentum Basket
+Selects the strongest five point-in-time pool members and rebalances weekly.
 """
 
-def on_init(ctx):
-    ctx.fast_period = ctx.param("fast_period", 12)
-    ctx.slow_period = ctx.param("slow_period", 26)
-    ctx.order_pct = ctx.param("order_pct", 1.0)
-    ctx.cooldown_bars = ctx.param("cooldown_bars", 0)
-    ctx.stop_loss_pct = ctx.param("stop_loss_pct", 0.0)
-    ctx.take_profit_pct = ctx.param("take_profit_pct", 0.0)
-    ctx.state.set("bar_index", -1)
-    ctx.state.set("last_order_bar", -999999)
-    ctx.state.set("entry_price", 0.0)
+# @param holdings int 5 Number of holdings range=3:20:1
+# @param max_weight float 0.18 Maximum weight per holding range=0.05:0.3:0.01
 
-def _ema(values, period):
-    if not values:
-        return []
-    alpha = 2.0 / (float(period) + 1.0)
-    out = []
-    ema = None
-    for value in values:
-        price = float(value)
-        ema = price if ema is None else alpha * price + (1.0 - alpha) * ema
-        out.append(ema)
-    return out
 
-def _quote_amount(ctx):
-    try:
-        budget = float(ctx.investment_amount or 0.0)
-    except Exception:
-        budget = 0.0
-    pct = max(0.0, min(1.0, float(ctx.order_pct or 0.0)))
-    return budget * pct
+def initialize(context):
+    context.set_universe(pool="sp500")
+    context.subscribe(frequency="1d")
+    context.set_warmup(80)
+    context.set_benchmark("USStock:SPY")
+    run_weekly(rebalance, weekday=1, time="09:35")
 
-def on_bar(ctx, bar):
-    bar_index = int(ctx.state.get("bar_index", -1) or -1) + 1
-    ctx.state.set("bar_index", bar_index)
 
-    price = float(bar["close"])
-    history = ctx.bars(max(int(ctx.slow_period) + 3, 5))
-    closes = [float(item["close"]) for item in history]
-    if len(closes) < max(int(ctx.fast_period), int(ctx.slow_period)) + 2:
+def rebalance(context, data):
+    holdings = int(context.params.get("holdings", 5))
+    max_weight = float(context.params.get("max_weight", 0.18))
+    symbols = get_universe_stocks()
+    if len(symbols) < holdings:
         return
 
-    fast = _ema(closes, int(ctx.fast_period))
-    slow = _ema(closes, int(ctx.slow_period))
-    golden = fast[-1] > slow[-1] and fast[-2] <= slow[-2]
-    death = fast[-1] < slow[-1] and fast[-2] >= slow[-2]
-
-    last_order_bar = int(ctx.state.get("last_order_bar", -999999) or -999999)
-    if last_order_bar == bar_index:
-        return
-    cooldown_until = int(ctx.state.get("cooldown_until", -1) or -1)
-    if cooldown_until >= bar_index:
+    scores = get_factors(symbols, "momentum_20")
+    if scores.empty or "momentum_20" not in scores.columns:
         return
 
-    entry_price = float(ctx.state.get("entry_price", 0.0) or 0.0)
-
-    if ctx.position.has_long() and entry_price > 0:
-        if ctx.stop_loss_pct > 0 and price <= entry_price * (1.0 - float(ctx.stop_loss_pct)):
-            ctx.basket("long").open_child_order(layer=1, order=90, notional=0, price=price, action="close", payload={"reason": "stop_loss"})
-            ctx.state.set("last_order_bar", bar_index)
-            return
-        if ctx.take_profit_pct > 0 and price >= entry_price * (1.0 + float(ctx.take_profit_pct)):
-            ctx.basket("long").open_child_order(layer=1, order=91, notional=0, price=price, action="close", payload={"reason": "take_profit"})
-            ctx.state.set("last_order_bar", bar_index)
-            return
-
-    if golden and not ctx.position.has_long():
-        quote = _quote_amount(ctx)
-        if quote > 0:
-            ctx.basket("long").open_child_order(layer=1, order=1, notional=quote, price=price, action="open", payload={"reason": "golden_cross"})
-            ctx.state.set("entry_price", price)
-            ctx.state.set("last_order_bar", bar_index)
-            if int(ctx.cooldown_bars or 0) > 0:
-                ctx.state.set("cooldown_until", bar_index + int(ctx.cooldown_bars))
+    ranked = scores["momentum_20"].dropna().sort_values(ascending=False)
+    selected = list(ranked.head(holdings).index)
+    if not selected:
         return
 
-    if death and ctx.position.has_long():
-        ctx.basket("long").open_child_order(layer=1, order=2, notional=0, price=price, action="close", payload={"reason": "death_cross"})
-        ctx.state.set("entry_price", 0.0)
-        ctx.state.set("last_order_bar", bar_index)
-```
+    target_weight = min(max_weight, 0.95 / len(selected))
+    current = get_positions()
+
+    for symbol in current:
+        if symbol not in selected:
+            order_target_percent(symbol, 0.0, reason="weekly_remove")
+
+    for symbol in selected:
+        order_target_percent(symbol, target_weight, reason="weekly_select")
+~~~
+
+This strategy class must use point-in-time universe and factor data. Evaluate coverage, survivorship bias, turnover, trading costs, lot sizes, and unfilled orders in addition to headline return.
 
 ---
 
-## 13. Backtest and Publishing Requirements
+## 17. Backtests, results, and diagnosis
 
-Strategies can have multiple saved versions. To avoid publishing untested code:
+Core backtest request:
 
-- Code must be saved as a Script Source.
-- The strategy must have at least one successful backtest record.
-- Publishing is rejected by both frontend and backend until a successful backtest exists.
-- Backtest symbol, market, timeframe, parameters, and results should match the intended strategy use.
+~~~json
+{
+  "code": "...",
+  "startDate": "2024-01-01",
+  "endDate": "2025-12-31",
+  "initialCapital": 100000,
+  "commission": 0.0005,
+  "slippage": 0.0005,
+  "leverageEnabled": false,
+  "leverage": 1,
+  "params": {},
+  "persist": true
+}
+~~~
 
-Before publishing:
+You may supply <code>sourceId</code> or <code>strategyId</code> to load saved source. The request cannot override source markets, instruments, or frequency.
 
-- validation passes
-- no indicator `output/plots/signals` contract remains
-- run-panel fields are not declared with `ctx.param`
-- no `ctx.basket("buy")` or `ctx.basket("sell")`
-- every child order has `layer=` and `order=`
-- spot strategies have no short intent
-- sell/death semantics are not accidentally written as short entries
+Inspect:
+
+- <code>resultStatus</code>: <code>no_signals</code>, <code>open_position_only</code>, or <code>completed_trades</code>.
+- <code>totalExecutions</code>: fill count.
+- <code>totalTrades</code>: closed round-trip count, not fill count.
+- <code>rawTrades</code>/<code>executions</code>: opens, adds, reductions, and closes.
+- <code>closedTrades</code>: completed round trips.
+- <code>orderLedger</code>: fills, deferrals, rejections, and reasons.
+- <code>holdingSnapshots</code>/<code>rebalanceRecords</code>: portfolio evolution.
+- <code>equityCurve</code>, drawdown, win rate, Profit Factor, benchmark, and excess return.
+- <code>dataProvenance</code>/<code>executionAssumptions</code>: data origin and fill model.
+
+Zero executions can be valid: insufficient history, conditions never met, poor parameters, missing data, or rejected orders. Read logs and the order ledger before treating it as an engine failure.
 
 ---
 
-## 14. Common Validation Hints
+## 18. Deployment and live boundaries
 
-| Hint | Meaning | Fix |
+Core deployment fields include:
+
+- <code>sourceId</code>
+- <code>name</code>
+- <code>initialCapital</code>
+- <code>executionMode</code>: <code>signal</code> or <code>live</code>
+- optional <code>credentialId</code>, <code>params</code>, leverage, position side, and notifications
+
+A new deployment is stopped and must be started explicitly. Stop it before deletion.
+
+Current live-account boundaries:
+
+- Crypto live execution requires a supported exchange credential.
+- USStock live execution requires Alpaca or IBKR.
+- Mixed-market live deployment is unsupported.
+- Other markets cannot be forced through a mismatched credential.
+
+Use signal mode first to validate notifications, signal frequency, and state restoration. A successful backtest does not prove that credentials, balances, venue rules, minimum order sizes, and network health are ready for live trading.
+
+---
+
+## 19. Sandbox and common failures
+
+Strategy source runs in a safe execution environment. File, network, database, process, dynamic execution, reflection, and unsafe imports are prohibited. Do not use <code>eval</code>, <code>exec</code>, <code>compile</code>, <code>open</code>, dunder bypasses, or external state.
+
+| Error | Meaning | Fix |
 | --- | --- | --- |
-| `MISSING_ON_INIT` | `on_init(ctx)` is missing | add init handler |
-| `MISSING_ON_BAR` | `on_bar(ctx, bar)` is missing | add bar handler |
-| `CTX_PARAM_MISSING_DEFAULT` | `ctx.param` has no default | use `ctx.param("name", default)` |
-| `CTX_PARAM_RUN_PANEL_FIELD` | run-panel field declared as parameter | read `ctx.direction`, etc. |
-| `INDICATOR_OUTPUT_CONTRACT` | indicator output remains in strategy | remove output/plots/signals |
-| `BASKET_CHILD_ORDER_MISSING_LAYER_ORDER` | child order lacks layer/order | pass `layer=` and `order=` |
-| `BASKET_SIDE_MUST_BE_LONG_OR_SHORT` | basket side is invalid | use `"long"` or `"short"` only |
+| <code>strategyV2.codeRequired</code> | empty source | submit complete source |
+| <code>strategyV2.initializeRequired</code> | initialize missing | add it |
+| <code>strategyV2.initializeFailed:...</code> | initialization failed | keep initialize declarative |
+| <code>strategyV2.universeRequired</code> | universe missing | call <code>set_universe</code> |
+| <code>strategyV2.handlerRequired</code> | no handler/schedule | add a handler or schedule |
+| <code>strategyV2.leverageCryptoSwapOnly</code> | invalid leverage market | use static Crypto swaps only |
+| <code>strategyV2.leverageNotAllowed</code> | run requests unpermitted leverage | permit it legally or disable it |
+| <code>strategyV2.leverageExceedsStrategyLimit</code> | requested leverage too high | lower the request |
+| <code>strategyV2.dataUnavailable:...</code> | instrument data unavailable | check canonical symbol and range |
+| <code>strategyV2.runtimeFailed:...</code> | handler raised | inspect the named handler and cause |
 
 ---
 
-## 15. Best Practices
+## 20. Pre-publication checklist
 
-- Use indicators to make ideas visible; use ScriptStrategy to execute them.
-- Default templates should focus on trend, breakout, moving average, momentum, mean reversion, and volatility-stop logic. Do not use grid, DCA, or martingale as ordinary strategy templates.
-- Keep defaults conservative.
-- Separate open, add, reduce, and close.
-- Reversal is close first, then open opposite.
-- Scale-in logic needs max layers, price distance, cooldown, and stop protection.
-- Keep loops bounded by lookback windows.
-- Log important state changes without spamming.
-- Save a new version and rerun backtests after meaningful changes.
+- [ ] The file has an English docstring covering name, universe, signals, schedule, and risk.
+- [ ] <code>initialize</code> only declares universe, subscription, warm-up, benchmark, schedules, leverage permission, and initial <code>g</code>.
+- [ ] Instruments are canonical and Crypto explicitly distinguishes spot/swap.
+- [ ] The source owns instruments and frequency; no run-form override is assumed.
+- [ ] Parameter defaults and code fallbacks agree.
+- [ ] Every history window checks actual length.
+- [ ] No future rows, negative shifts, or centered rolling.
+- [ ] Long exits and short entries are independent.
+- [ ] Exposure is capped; grid, DCA, martingale, and scaling layers have hard limits.
+- [ ] Every order has an auditable reason.
+- [ ] Risk percentages use decimal ratios.
+- [ ] Leverage is declared only for Crypto swaps and is not multiplied twice.
+- [ ] The manifest verifies successfully.
+- [ ] The order ledger is reviewed, not only the equity curve.
+- [ ] Robustness is tested across periods and cost assumptions.
+- [ ] At least one successful backtest exists before publication.
+- [ ] Credentials, market, balance, lot size, and notifications are checked before live use.

@@ -17,7 +17,6 @@ DASHBOARD = "Dashboard"
 PORTFOLIO = "Portfolio"
 SETTINGS = "Settings"
 BILLING = "Billing"
-EXPERIMENT = "Experiment"
 FAST_ANALYSIS = "FastAnalysis"
 GLOBAL_MARKET = "GlobalMarket"
 AI_CHAT = "AIChat"
@@ -43,7 +42,6 @@ ALL_TAGS = [
     {"name": PORTFOLIO, "description": "Manual portfolio tracking (Internal)"},
     {"name": SETTINGS, "description": "System and brand settings (Mixed)"},
     {"name": BILLING, "description": "Membership and USDT billing (Internal)"},
-    {"name": EXPERIMENT, "description": "Strategy tuning experiments (Internal)"},
     {"name": FAST_ANALYSIS, "description": "Fast AI analysis (Public)"},
     {"name": GLOBAL_MARKET, "description": "Global market overview (Public)"},
     {"name": AI_CHAT, "description": "Legacy AI chat compatibility (Internal)"},

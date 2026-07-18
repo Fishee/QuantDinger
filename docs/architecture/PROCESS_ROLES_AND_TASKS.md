@@ -8,7 +8,7 @@ The production deployment uses one backend image with independent process roles.
 | Migration | `python -m app.commands.migrate` | Fail-fast schema application before services start |
 | Trading | `python -m app.commands.trading_worker` | Strategy runtimes, pending orders, grid fills, exchange connections |
 | Scheduler | `python -m app.commands.scheduler` | Portfolio monitoring, deployment schedules, payment scans, signal alerts |
-| Celery Worker | `celery -A app.celery_app:celery_app worker` | AI, backtests, experiments, reports, and maintenance jobs |
+| Celery Worker | `celery -A app.celery_app:celery_app worker` | AI, backtests, reports, and maintenance jobs |
 | Celery Beat | `celery -A app.celery_app:celery_app beat` | Periodic maintenance dispatch |
 
 ## Ownership rules
@@ -26,7 +26,7 @@ The production deployment uses one backend image with independent process roles.
 Celery owns finite jobs that can be serialized, retried, and observed independently:
 
 - fast AI analysis;
-- agent backtests and experiment pipelines;
+- agent backtests;
 - reflection and AI calibration;
 - market catalog synchronization;
 - runtime metadata cleanup.

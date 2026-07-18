@@ -1,7 +1,7 @@
 """
 In-process async job runner for the Agent Gateway.
 
-Backtests, experiment pipelines, and structured tuning are CPU/IO heavy;
+Backtests are CPU/IO heavy;
 HTTP clients (especially LLM-driven agents) prefer "submit + poll" semantics.
 We persist every job in `qd_agent_jobs` so the API survives worker restarts
 and so audit can correlate jobs with the agent that triggered them.

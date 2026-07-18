@@ -29,7 +29,7 @@ conflicting position row.
 ## Existing Protections To Preserve
 
 - Agent jobs have `job_id` and `idempotency_key` columns with a unique index.
-- Agent quick-trade/backtest/experiment routes already use idempotency helpers.
+- Agent quick-trade and backtest routes already use idempotency helpers.
 - Strategy positions and account mirror tables use uniqueness on natural keys.
 - Grid cells use a unique `(strategy_id, symbol, cell_index)` constraint.
 - Data providers use in-process single-flight locks for cache refresh.
@@ -44,7 +44,7 @@ conflicting position row.
 - Strategy restore must not start duplicate execution loops after a crash/redeploy.
 - Pending-order dispatch should atomically claim work before calling exchanges.
 - Exchange retry code must dedupe by `client_order_id` where the venue supports it.
-- Long-running LLM/backtest/experiment endpoints should avoid blocking request threads.
+- Long-running LLM/backtest endpoints should avoid blocking request threads.
 
 ## Required Patterns
 
@@ -56,7 +56,6 @@ agent, proxy, or worker:
 - order placement
 - close position
 - backtest submit
-- experiment submit
 - USDT order create/confirm
 - strategy start/stop when triggered by API
 

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import string
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +76,7 @@ def _s(zh: str, en: str) -> SkillText:
     return SkillText(zh=zh, en=en)
 
 
-REGISTRY_VERSION = "2026.06.15.2"
+REGISTRY_VERSION = "2026.07.18.1"
 USER_SKILLS_DIR = Path("/app/data/ai_skills")
 _SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_\-]{2,63}$")
 
@@ -124,7 +126,7 @@ _SKILLS: tuple[SkillDefinition, ...] = (
             "请基于 {symbol_label} 做一次指标研发。我的想法/偏好：\n希望观察的结构或信号：\n希望显示的标记/图层：\n可调参数：\n不希望出现的视觉干扰：\n请生成适合 QuantDinger 指标编辑器的图表指标草稿。指标只用于看图，不用于回测或实盘执行。",
             "Run indicator research for {symbol_label}. My preferences:\nStructures or signals to visualize:\nMarkers/layers I want:\nTunable parameters:\nVisual clutter to avoid:\nGenerate a QuantDinger Indicator editor draft. Indicators are chart-only and are not used for backtest or live execution.",
         ),
-        system_instruction="Use QuantDinger indicator contracts for chart-only visualization. Do not output executable strategy signals, ScriptStrategy code, or Pine Script unless explicitly requested.",
+        system_instruction="Use QuantDinger indicator contracts for chart-only visualization. Do not output executable strategy code or Pine Script unless explicitly requested.",
         keywords=("指标", "indicator", "ide", "图表", "可视化"),
         requires=("market_data", "indicator_requirements"),
         produces=("indicator_code", "visualization_plan"),
@@ -164,20 +166,19 @@ _SKILLS: tuple[SkillDefinition, ...] = (
         category="strategy",
         icon="code",
         label=_s("策略研发", "Strategy R&D"),
-        description=_s("生成可回测、可实盘复核的 Python ScriptStrategy 草稿", "Generate Python ScriptStrategy drafts for backtest and live review"),
+        description=_s("生成可回测、可实盘复核的 Strategy API V2 草稿", "Generate Strategy API V2 drafts for backtest and live review"),
         prompt_template=_s(
-            "请为 {symbol_label} 设计一个脚本策略。我的想法/偏好：\n交易周期：\n风险偏好：\n信号逻辑：\n仓位/止损/止盈规则：\n请先和我确认需求，再生成 QuantDinger Python ScriptStrategy。",
-            "Design a Python ScriptStrategy for {symbol_label}. Preferences:\nTimeframe:\nRisk profile:\nSignal logic:\nSizing/stop/take-profit rules:\nConfirm requirements with me before generating QuantDinger Python ScriptStrategy code.",
+            "请设计一个 Strategy API V2 策略，策略源码负责标的、市场、周期、调度和交易逻辑。仅确认真正缺失的需求，再生成可运行的 QuantDinger Python 代码。",
+            "Design a Strategy API V2 strategy. The source owns its universe, market, frequency, schedule, and trading logic. Confirm genuinely missing requirements before generating runnable QuantDinger Python.",
         ),
         system_instruction=(
-            "Use QuantDinger ScriptStrategy contracts. For scale-in or multiple same-direction entries, "
-            "emit explicit ctx.open_long/add_long/open_short/add_short intents; "
-            "or basket child-order intents with max-entry, price-distance, and same-bar duplicate guards. "
-            "Include code-owned risk parameters, backtest notes, and live alignment notes."
+            "Use QuantDinger Strategy API V2 exclusively. The source owns instruments, market, subscriptions, "
+            "frequency, schedules, factors, and orders. "
+            "Only Crypto perpetual sources may explicitly permit user-adjustable leverage."
         ),
         keywords=("脚本策略", "python", "scriptstrategy", "自动策略"),
         requires=("market_data", "strategy_requirements"),
-        produces=("script_strategy_code", "backtest_plan"),
+        produces=("strategy_source", "backtest_plan"),
         route="/strategy-ide?tab=script",
         action_type="strategy",
         risk_level="write_draft",
@@ -384,7 +385,7 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
         ),
         system_instruction="Use search results when available. Do not overstate snippets as verified facts; cite source titles/domains briefly.",
         keywords=("新闻", "消息", "事件", "影响", "为什么", "latest", "news", "headline", "event", "impact"),
-        requires=("web_search"),
+        requires=("web_search",),
         produces=("news_context", "event_summary", "source_list"),
         action_type="workflow",
         risk_level="read",
@@ -469,10 +470,10 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
         label=_s("回测执行", "Backtest runner"),
         description=_s("提交回测任务并解释收益、回撤、胜率、交易和偏差", "Submit backtests and explain returns, drawdown, win rate, trades, and bias"),
         prompt_template=_s(
-            "请帮我为当前策略准备回测。先确认标的、周期、时间范围、初始资金、手续费、滑点和参数，然后提交回测或给出可提交配置。",
-            "Prepare a backtest for the strategy. Confirm symbol, timeframe, date range, capital, fees, slippage, and parameters, then submit or produce a submit-ready config.",
+            "请帮我为当前 Strategy API V2 策略准备回测。标的、市场和周期由策略源码声明；请确认时间范围、初始资金、手续费、滑点、杠杆开关和参数，然后提交回测或给出可提交配置。",
+            "Prepare a backtest for the current Strategy API V2 source. The source declares instruments, markets, and frequency; confirm date range, capital, fees, slippage, leverage policy, and parameters, then submit or produce a submit-ready config.",
         ),
-        system_instruction="Use strict mode when possible and explain data limitations.",
+        system_instruction="Use the Strategy API V2 backtest contract. Never request symbol or timeframe overrides outside the source manifest, and explain data limitations.",
         keywords=("回测", "backtest", "收益", "回撤", "胜率"),
         requires=("strategy", "market_data", "backtest_config"),
         produces=("backtest_report",),
@@ -480,41 +481,6 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
         risk_level="write_draft",
         read_only=False,
         priority=88,
-    ),
-    SkillDefinition(
-        id="parameter_tuning",
-        category="backtest",
-        icon="control",
-        label=_s("参数调优", "Parameter tuning"),
-        description=_s("运行结构化调参、网格/随机搜索和稳健性比较", "Run structured tuning, grid/random search, and robustness comparison"),
-        prompt_template=_s(
-            "请帮我为策略设计参数调优实验。请给出参数范围、目标函数、过拟合控制、样本内/样本外划分、稳健性判断和最终候选参数。",
-            "Design a tuning experiment for the strategy. Provide parameter ranges, objective, overfit controls, in/out-of-sample split, robustness checks, and final candidates.",
-        ),
-        system_instruction="Warn about overfitting and require out-of-sample validation before live use.",
-        keywords=("调参", "优化", "网格", "随机", "tune", "optimize"),
-        requires=("strategy", "parameter_space"),
-        produces=("tuning_plan", "candidate_params"),
-        action_type="workflow",
-        risk_level="write_draft",
-        read_only=False,
-        priority=84,
-    ),
-    SkillDefinition(
-        id="regime_detection",
-        category="backtest",
-        icon="partition",
-        label=_s("市场状态识别", "Regime detection"),
-        description=_s("识别趋势、震荡、高波动、低波动等状态并选择策略", "Detect trend, range, high-vol, and low-vol regimes for strategy selection"),
-        prompt_template=_s(
-            "请对 {symbol_label} 做市场状态识别，输出当前状态、证据、适配策略、不适配策略、状态切换触发条件。",
-            "Detect the market regime for {symbol_label}. Return current regime, evidence, suitable strategies, unsuitable strategies, and regime-switch triggers.",
-        ),
-        system_instruction="Use regime tools when available and map regimes to strategy choices.",
-        keywords=("市场状态", "震荡", "趋势", "regime", "volatility"),
-        requires=("market_data",),
-        produces=("regime_report",),
-        priority=83,
     ),
     SkillDefinition(
         id="portfolio_monitoring",
@@ -596,7 +562,7 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
             "请帮我配置 QuantDinger MCP Server。请根据我的客户端说明环境变量、Agent Token 权限、连接方式、可用工具、验证步骤和常见故障。",
             "Help configure QuantDinger MCP Server. Based on my client, explain env vars, Agent Token scopes, transport, available tools, verification, and troubleshooting.",
         ),
-        system_instruction="Keep MCP live trading disabled; explain REST-only live boundary when needed.",
+        system_instruction="Default to paper-only access. If live quick orders are explicitly required, explain T scope, a live-capable token, client confirmation, and the server-side live-trading gate.",
         keywords=("mcp", "server", "外部AI", "Claude", "Cursor"),
         requires=("client_type", "agent_token_policy"),
         produces=("mcp_setup_guide",),
@@ -608,13 +574,13 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
         category="operations",
         icon="clock-circle",
         label=_s("任务监控", "Job monitor"),
-        description=_s("跟踪异步回测、实验、优化任务状态和日志", "Track async backtest, experiment, and optimization jobs with logs"),
+        description=_s("跟踪异步回测任务状态、进度、结果和错误", "Track async backtest job status, progress, results, and errors"),
         prompt_template=_s(
             "请帮我检查异步任务状态。请读取任务进度、终态、错误原因、输出产物和下一步处理建议。",
             "Check async job status. Read progress, terminal state, error cause, artifacts, and recommended next steps.",
         ),
         system_instruction="Use bounded polling/streaming and summarize failures clearly.",
-        keywords=("任务", "进度", "job", "stream", "pipeline"),
+        keywords=("任务", "进度", "回测", "job", "stream", "backtest"),
         requires=("job_id_or_context",),
         produces=("job_status_report",),
         priority=77,
@@ -719,8 +685,38 @@ def _ensure_user_dir() -> None:
     USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _skill_path(skill_id: str) -> Path:
     return USER_SKILLS_DIR / f"{skill_id}.json"
+
+
+def _contains_forbidden_field(value: Any, forbidden: set[str]) -> bool:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key).strip().lower() in forbidden:
+                return True
+            if _contains_forbidden_field(nested, forbidden):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_forbidden_field(item, forbidden) for item in value)
+    return False
+
+
+def _prompt_fields(value: Any) -> set[str]:
+    texts: list[str] = []
+    if isinstance(value, dict):
+        texts.extend(str(item or "") for item in value.values())
+    else:
+        texts.append(str(value or ""))
+    fields: set[str] = set()
+    for text in texts:
+        for _, field_name, _, _ in string.Formatter().parse(text):
+            if field_name:
+                fields.add(field_name)
+    return fields
 
 
 def _validate_skill_payload(payload: dict[str, Any], *, updating: bool = False) -> tuple[bool, str]:
@@ -731,11 +727,14 @@ def _validate_skill_payload(payload: dict[str, Any], *, updating: bool = False) 
         return False, "skill id must match ^[a-z][a-z0-9_-]{2,63}$"
     if not updating and skill_id in _builtin_ids():
         return False, "builtin skills cannot be overridden"
-    kind = str(payload.get("kind") or payload.get("action_type") or "prompt").strip()
+    kind = str(payload.get("kind") or "prompt").strip()
     if kind != "prompt":
         return False, "only prompt skills can be installed in this version"
+    action_type = str(payload.get("action_type") or "prompt").strip()
+    if action_type != "prompt":
+        return False, "installed skills must use action_type=prompt"
     forbidden = {"code", "script", "python", "shell", "command", "commands", "exec", "runtime", "webhook"}
-    if any(key in payload for key in forbidden):
+    if _contains_forbidden_field(payload, forbidden):
         return False, "prompt skills cannot include executable fields"
     risk_level = str(payload.get("risk_level") or "read").strip()
     if risk_level not in {"read", "write_draft", "write_config"}:
@@ -744,11 +743,24 @@ def _validate_skill_payload(payload: dict[str, Any], *, updating: bool = False) 
     prompt_template = payload.get("prompt_template") or payload.get("prompt")
     if not label or not prompt_template:
         return False, "label and prompt_template are required"
+    if _prompt_fields(prompt_template) - {"symbol_label"}:
+        return False, "prompt_template only supports the {symbol_label} placeholder"
+    route = str(payload.get("route") or "").strip()
+    if route and (not route.startswith("/") or route.startswith("//")):
+        return False, "route must be an application-relative path"
+    if "enabled" in payload and not isinstance(payload.get("enabled"), bool):
+        return False, "enabled must be a boolean"
+    try:
+        priority = int(payload.get("priority") or 40)
+    except (TypeError, ValueError):
+        return False, "priority must be an integer"
+    if not 0 <= priority <= 100:
+        return False, "priority must be between 0 and 100"
     return True, "ok"
 
 
 def _skill_from_payload(payload: dict[str, Any]) -> SkillDefinition:
-    action_type = str(payload.get("action_type") or payload.get("kind") or "prompt").strip()
+    action_type = "prompt"
     risk_level = str(payload.get("risk_level") or "read").strip()
     return SkillDefinition(
         id=str(payload.get("id")).strip(),
@@ -841,7 +853,7 @@ def install_prompt_skill(payload: dict[str, Any], install_source: str = "manual"
     skill_id = str(payload["id"]).strip()
     if _skill_path(skill_id).exists():
         raise ValueError("skill already installed")
-    now = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    now = _utc_now_iso()
     stored = dict(payload)
     stored["kind"] = "prompt"
     stored["enabled"] = bool(stored.get("enabled", True))
@@ -862,7 +874,7 @@ def set_skill_enabled(skill_id: str, enabled: bool) -> dict[str, Any]:
         raise FileNotFoundError("skill not found")
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["enabled"] = bool(enabled)
-    payload["updated_at"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    payload["updated_at"] = _utc_now_iso()
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
@@ -888,7 +900,10 @@ def render_prompt_template(skill: SkillDefinition, language: str, context: dict[
         symbol_label = symbol
     else:
         symbol_label = "当前标的" if (language or "").lower().startswith("zh") else "the current symbol"
-    return skill.prompt_template.pick(language).format(symbol_label=symbol_label)
+    try:
+        return skill.prompt_template.pick(language).format(symbol_label=symbol_label)
+    except (KeyError, ValueError, IndexError):
+        return skill.prompt_template.pick(language)
 
 
 def match_skills(message: str, intent: str = "", limit: int = 5) -> list[SkillDefinition]:

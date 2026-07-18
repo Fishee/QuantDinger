@@ -43,7 +43,7 @@
         "type": "object",
         "properties": {
           "job_id":      { "type": "string" },
-          "kind":        { "type": "string", "enum": ["backtest","experiment_pipeline","structured_tune","ai_optimize"] },
+          "kind":        { "type": "string", "enum": ["backtest", "quick_trade_order"] },
           "status":      { "type": "string", "enum": ["queued","running","succeeded","failed","cancelled"] },
           "request":     { "type": "object" },
           "result":      { "type": "object" },
@@ -70,25 +70,56 @@
       },
       "BacktestRequest": {
         "type": "object",
-        "required": ["code","market","symbol","timeframe","start_date","end_date"],
+        "additionalProperties": false,
+        "required": ["code","startDate","endDate"],
         "properties": {
-          "code":             { "type": "string", "description": "ScriptStrategy Python code using on_init(ctx) and on_bar(ctx, bar)" },
-          "market":           { "type": "string", "example": "Crypto" },
-          "symbol":           { "type": "string", "example": "BTC/USDT" },
-          "timeframe":        { "type": "string", "example": "1D" },
-          "start_date":       { "type": "string", "example": "2024-01-01" },
-          "end_date":         { "type": "string", "example": "2024-12-31" },
-          "initial_capital":  { "type": "number", "default": 10000 },
+          "code":             { "type": "string", "description": "Strategy API V2 Python code using initialize(context) and a runtime handler" },
+          "startDate":        { "type": "string", "format": "date", "example": "2024-01-01" },
+          "endDate":          { "type": "string", "format": "date", "example": "2024-12-31" },
+          "initialCapital":   { "type": "number", "exclusiveMinimum": 0, "default": 10000 },
           "commission":       { "type": "number", "default": 0.001 },
           "slippage":         { "type": "number", "nullable": true },
-          "leverage":         { "type": "integer", "default": 1 },
-          "trade_direction":  { "type": "string", "default": "long" },
-          "strictMode":       { "type": "boolean", "default": true, "description": "When true, signals execute on next bar open (live-aligned). When false, uses aggressive MTF/bar path." },
-          "strict_mode":      { "type": "boolean", "description": "Alias for strictMode" },
-          "strategy_config":  { "type": "object" },
-          "script_params":    { "type": "object" },
-          "params":           { "type": "object", "description": "Alias for script_params" },
-          "market_type":      { "type": "string", "enum": ["spot", "swap"], "nullable": true }
+          "leverageEnabled":  { "type": "boolean", "default": false },
+          "leverage":         { "type": "number", "default": 1 },
+          "params":           { "type": "object" }
+        }
+      },
+      "StrategyDeploymentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "sourceId", "initialCapital"],
+        "properties": {
+          "name":             { "type": "string" },
+          "sourceId":         { "type": "integer" },
+          "initialCapital":   { "type": "number", "exclusiveMinimum": 0 },
+          "executionMode":    { "type": "string", "enum": ["signal", "live"], "default": "signal" },
+          "credentialId":     { "type": "integer", "nullable": true },
+          "leverageEnabled":  { "type": "boolean", "default": false },
+          "leverage":         { "type": "number", "default": 1 },
+          "params":           { "type": "object" },
+          "notificationChannels": { "type": "array", "items": { "type": "string" } },
+          "notificationTargets":  { "type": "object" },
+          "positionSide":     { "type": "string", "enum": ["long", "short"], "nullable": true },
+          "accountRisk":      { "type": "object" }
+        }
+      },
+      "StrategyDeploymentPatch": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "name":                 { "type": "string" },
+          "sourceId":             { "type": "integer" },
+          "initialCapital":       { "type": "number" },
+          "executionMode":        { "type": "string", "enum": ["signal", "live"] },
+          "credentialId":         { "type": "integer", "nullable": true },
+          "leverageEnabled":      { "type": "boolean" },
+          "leverage":             { "type": "number" },
+          "params":               { "type": "object" },
+          "notificationChannels": { "type": "array", "items": { "type": "string" } },
+          "notificationTargets":  { "type": "object" },
+          "positionSide":         { "type": "string", "enum": ["long", "short"], "nullable": true },
+          "accountRisk":          { "type": "object" }
         }
       },
       "IndicatorValidateRequest": {
@@ -121,18 +152,21 @@
       },
       "OrderRequest": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["market","symbol","side","qty"],
         "properties": {
           "market":      { "type": "string" },
           "symbol":      { "type": "string" },
           "side":        { "type": "string", "enum": ["buy","sell"] },
-          "qty":         { "type": "number" },
+          "qty":         { "type": "number", "exclusiveMinimum": 0 },
           "order_type":  { "type": "string", "enum": ["market","limit"], "default": "market" },
           "limit_price": { "type": "number", "nullable": true },
           "credential_id": { "type": "integer", "description": "Required for live agent trading" },
           "market_type": { "type": "string", "enum": ["spot","swap"], "default": "spot" },
           "leverage": { "type": "integer", "default": 1 },
-          "margin_mode": { "type": "string", "enum": ["cross","isolated"], "nullable": true }
+          "margin_mode": { "type": "string", "enum": ["cross","isolated"], "nullable": true },
+          "tp_price": { "type": "number", "nullable": true, "description": "Optional take-profit price for live orders" },
+          "sl_price": { "type": "number", "nullable": true, "description": "Optional stop-loss price for live orders" }
         }
       }
     }
@@ -206,7 +240,7 @@
       "post": {
         "summary": "Create a strategy (status defaults to 'stopped')",
         "x-scope-class": "W",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StrategyDeploymentRequest" } } } },
         "responses": { "200": { "description": "Created" } }
       }
     },
@@ -219,11 +253,11 @@
         "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
       },
       "patch": {
-        "summary": "Update a strategy (status='running' requires T scope)",
+        "summary": "Update canonical strategy deployment settings",
         "x-scope-class": "W",
         "parameters": [{ "in": "path", "name": "strategy_id", "required": true, "schema": { "type": "integer" } }],
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
-        "responses": { "200": { "description": "OK" } }
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StrategyDeploymentPatch" } } } },
+        "responses": { "200": { "description": "OK" }, "400": { "description": "Unsupported or invalid deployment field" } }
       }
     },
     "/api/agent/v1/strategies/{strategy_id}/stop": {
@@ -307,35 +341,6 @@
         "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } }
       }
     },
-    "/api/agent/v1/experiments/regime/detect": {
-      "post": {
-        "summary": "Detect market regime (sync)",
-        "x-scope-class": "B",
-        "responses": { "200": { "description": "OK" } }
-      }
-    },
-    "/api/agent/v1/experiments/pipeline": {
-      "post": {
-        "summary": "Submit grid pipeline job",
-        "x-scope-class": "B",
-        "parameters": [{ "in": "header", "name": "Idempotency-Key", "required": false, "schema": { "type": "string" } }],
-        "responses": { "202": { "description": "Queued" } }
-      }
-    },
-    "/api/agent/v1/experiments/structured-tune": {
-      "post": {
-        "summary": "Submit structured (grid/random) tune job",
-        "x-scope-class": "B",
-        "responses": { "202": { "description": "Queued" } }
-      }
-    },
-    "/api/agent/v1/experiments/ai-optimize": {
-      "post": {
-        "summary": "Submit LLM-driven multi-round optimization job (consumes provider quota)",
-        "x-scope-class": "B",
-        "responses": { "202": { "description": "Queued" } }
-      }
-    },
     "/api/agent/v1/jobs": {
       "get": {
         "summary": "List recent jobs",
@@ -395,7 +400,7 @@
         "x-scope-class": "T",
         "parameters": [{ "in": "header", "name": "Idempotency-Key", "required": false, "schema": { "type": "string" } }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderRequest" } } } },
-        "responses": { "200": { "description": "OK (paper fill)" }, "403": { "description": "Scope/instrument denied" }, "501": { "description": "Live execution requested but not enabled" } }
+        "responses": { "200": { "description": "OK (paper fill or live order)" }, "400": { "description": "Invalid order payload" }, "403": { "description": "Scope/instrument denied" }, "501": { "description": "Live-capable token used while AGENT_LIVE_TRADING_ENABLED is disabled" } }
       }
     },
     "/api/agent/v1/quick-trade/kill-switch": {

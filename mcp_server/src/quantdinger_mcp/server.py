@@ -48,10 +48,6 @@ MCP_TOOL_NAMES = (
     "create_strategy",
     "update_strategy",
     "submit_backtest",
-    "regime_detect",
-    "submit_experiment_pipeline",
-    "submit_structured_tune",
-    "submit_ai_optimize",
     "list_portfolio_positions",
     "list_paper_orders",
 )
@@ -122,13 +118,12 @@ mcp = FastMCP(
         "get_indicator_authoring_contract, validate_indicator_code, and "
         "save_indicator for visual indicator code. Do not backtest indicator code "
         "directly. "
-        "STRATEGY WORKFLOW: executable strategies must be ScriptStrategy code "
-        "with on_init(ctx) and on_bar(ctx, bar). Use create_strategy with "
-        "strategy_code or script_source_id. Use submit_backtest with full "
-        "ScriptStrategy Python code only. "
+        "STRATEGY WORKFLOW: executable strategies use the Strategy API V2 "
+        "manifest, initialize(context), and handle_data(context, data) contract. "
+        "Use create_strategy with a saved source_id, and submit_backtest with "
+        "Strategy API V2 Python code. "
         "Long jobs: use wait_for_job or stream_job_until_done (bounded). "
-        "submit_ai_optimize consumes server LLM quota; call only when explicitly "
-        "requested. Never pass natural language to backtest `code`."
+        "Never pass natural language to backtest `code`."
     ),
 )
 
@@ -241,6 +236,8 @@ def place_quick_order(
     market_type: str = "spot",
     leverage: int = 1,
     margin_mode: str | None = None,
+    tp_price: float | None = None,
+    sl_price: float | None = None,
     idempotency_key: str | None = None,
     confirm_order: bool = False,
     confirm_live_trading: bool = False,
@@ -286,13 +283,17 @@ def place_quick_order(
         payload["credential_id"] = int(credential_id)
     if margin_mode:
         payload["margin_mode"] = margin_mode
+    if tp_price is not None:
+        payload["tp_price"] = float(tp_price)
+    if sl_price is not None:
+        payload["sl_price"] = float(sl_price)
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
     return _post("/api/agent/v1/quick-trade/orders", json=payload, headers=headers)
 
 
 @mcp.tool()
 def get_job(job_id: str) -> Any:
-    """Poll a previously submitted backtest / experiment job."""
+    """Poll a previously submitted backtest job."""
     return _get(f"/api/agent/v1/jobs/{job_id}")
 
 
@@ -408,178 +409,74 @@ def get_indicator(indicator_id: int) -> Any:
 
 @mcp.tool()
 def create_strategy(
-    strategy_name: str,
-    market_category: str,
-    trading_config: dict,
-    strategy_code: str | None = None,
-    script_source_id: int | None = None,
-    strategy_mode: str = "script",
+    name: str,
+    source_id: int,
+    initial_capital: float,
     execution_mode: str = "signal",
-    strategy_type: str = "ScriptStrategy",
+    credential_id: int | None = None,
+    leverage_enabled: bool = False,
+    leverage: float = 1.0,
+    params: dict | None = None,
+    position_side: str | None = None,
+    account_risk: dict | None = None,
 ) -> Any:
-    """Create a stopped ScriptStrategy.
-
-    Current QuantDinger strategy assets are ScriptStrategy-only. Indicators are
-    chart-only; convert an indicator idea into ScriptStrategy code before using
-    this tool.
-    """
-    tc = assert_json_dict("trading_config", trading_config)
-    if strategy_type != "ScriptStrategy":
-        return {
-            "error": True,
-            "status": 400,
-            "body": {
-                "message": "Indicators are chart-only. create_strategy accepts ScriptStrategy only.",
-            },
-        }
-    if strategy_code:
-        assert_code_size(strategy_code, label="Strategy code")
-    source_id = script_source_id or tc.get("script_source_id") or tc.get("scriptSourceId")
-    if not strategy_code and not source_id:
-        return {
-            "error": True,
-            "status": 400,
-            "body": {
-                "message": "Pass strategy_code or script_source_id for a ScriptStrategy.",
-            },
-        }
-    if source_id:
-        tc["script_source_id"] = int(source_id)
-
-    payload: dict[str, Any] = {
-        "strategy_name": strategy_name,
-        "strategy_type": "ScriptStrategy",
-        "market_category": market_category,
-        "execution_mode": execution_mode,
-        "trading_config": tc,
-        "status": "stopped",
-        "strategy_mode": strategy_mode or "script",
+    """Deploy one saved Strategy API V2 source in stopped state."""
+    payload = {
+        "name": str(name).strip(),
+        "sourceId": int(source_id),
+        "initialCapital": float(initial_capital),
+        "executionMode": str(execution_mode),
+        "credentialId": int(credential_id) if credential_id else None,
+        "leverageEnabled": bool(leverage_enabled),
+        "leverage": float(leverage),
+        "params": assert_json_dict("params", params),
     }
-    if strategy_code:
-        payload["strategy_code"] = strategy_code
+    if position_side:
+        payload["positionSide"] = str(position_side)
+    if account_risk is not None:
+        payload["accountRisk"] = assert_json_dict("account_risk", account_risk)
     return _post("/api/agent/v1/strategies", json=payload)
 
 
 @mcp.tool()
 def update_strategy(strategy_id: int, patch: dict) -> Any:
-    """Patch a strategy (scope W). Cannot set status=running without scope T."""
+    """Patch the canonical deployment configuration for a strategy (scope W)."""
     body = assert_json_dict("patch", patch)
-    if str(body.get("status") or "").strip().lower() == "running":
-        return {
-            "error": True,
-            "status": 403,
-            "body": {
-                "message": (
-                    "Activating a strategy (status=running) requires T scope. "
-                    "Use the runtime/trading path with an explicitly scoped token."
-                ),
-            },
-        }
     return _patch(f"/api/agent/v1/strategies/{int(strategy_id)}", json=body)
 
 
-# Backtest / experiments
+# Backtests
 
 
 @mcp.tool()
 def submit_backtest(
     code: str,
-    market: str,
-    symbol: str,
-    timeframe: str,
     start_date: str,
     end_date: str,
     initial_capital: float = 10000,
     commission: float = 0.001,
     slippage: float | None = None,
-    leverage: int = 1,
-    trade_direction: str = "long",
-    strict_mode: bool = True,
-    strategy_config: dict | None = None,
-    script_params: dict | None = None,
-    market_type: str | None = None,
+    leverage_enabled: bool = False,
+    leverage: float = 1.0,
+    params: dict | None = None,
     idempotency_key: str | None = None,
 ) -> Any:
-    """Submit a ScriptStrategy backtest.
-
-    `code` must be full ScriptStrategy Python using `on_init(ctx)` and
-    `on_bar(ctx, bar)`. Chart indicator code is not accepted by the Agent v1
-    backtest endpoint.
-    """
+    """Submit a Strategy API V2 backtest; its manifest owns market data scope."""
     assert_code_size(code, label="Strategy code")
     payload: dict[str, Any] = {
         "code": code,
-        "market": market,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "start_date": start_date,
-        "end_date": end_date,
-        "initial_capital": initial_capital,
+        "startDate": start_date,
+        "endDate": end_date,
+        "initialCapital": initial_capital,
         "commission": commission,
+        "leverageEnabled": bool(leverage_enabled),
         "leverage": leverage,
-        "trade_direction": trade_direction,
-        "strictMode": strict_mode,
-        "strategy_config": assert_json_dict("strategy_config", strategy_config),
-        "script_params": assert_json_dict("script_params", script_params),
+        "params": assert_json_dict("params", params),
     }
     if slippage is not None:
         payload["slippage"] = slippage
-    if market_type:
-        payload["market_type"] = market_type
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
     return _post("/api/agent/v1/backtest/run", json=payload, headers=headers)
-
-
-@mcp.tool()
-def regime_detect(
-    market: str,
-    symbol: str,
-    timeframe: str,
-    start_date: str,
-    end_date: str,
-) -> Any:
-    """Detect the current market regime (synchronous)."""
-    return _post(
-        "/api/agent/v1/experiments/regime/detect",
-        json={
-            "market": market,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "startDate": start_date,
-            "endDate": end_date,
-        },
-    )
-
-
-@mcp.tool()
-def submit_experiment_pipeline(payload: dict, idempotency_key: str | None = None) -> Any:
-    """Submit a legacy grid pipeline job (scope B)."""
-    body = assert_json_dict("payload", payload)
-    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-    return _post("/api/agent/v1/experiments/pipeline", json=body, headers=headers)
-
-
-@mcp.tool()
-def submit_structured_tune(payload: dict) -> Any:
-    """Submit a grid/random tuning job. Returns a job for polling."""
-    return _post("/api/agent/v1/experiments/structured-tune", json=assert_json_dict("payload", payload))
-
-
-@mcp.tool()
-def submit_ai_optimize(payload: dict, confirm_llm_usage: bool = False) -> Any:
-    """Submit an LLM-driven multi-round optimization job (scope B)."""
-    if not confirm_llm_usage:
-        return {
-            "error": True,
-            "status": 400,
-            "body": {
-                "message": (
-                    "submit_ai_optimize consumes LLM quota. Re-call with "
-                    "confirm_llm_usage=true after explicit user approval."
-                ),
-            },
-        }
-    return _post("/api/agent/v1/experiments/ai-optimize", json=assert_json_dict("payload", payload))
 
 
 # Portfolio (read-only)

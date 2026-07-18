@@ -29,6 +29,7 @@ resource_guard.ResourceExhaustedError = RuntimeError
 resource_guard.assert_fd_available = lambda _label: None
 resource_guard.is_fd_exhaustion = lambda _exc: False
 resource_guard.mark_fd_exhausted = lambda _exc: None
+resource_guard.record_exception = lambda _exc, **_kwargs: None
 sys.modules.setdefault("app.utils.resource_guard", resource_guard)
 
 from app.services.live_trading.base import LiveOrderResult

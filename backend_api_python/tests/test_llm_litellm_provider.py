@@ -134,6 +134,60 @@ def test_litellm_provider_can_call_without_litellm_api_key(monkeypatch):
     assert captured["api_key"] == ""
 
 
+@pytest.mark.parametrize(
+    ("provider", "api_key", "base_url", "expected"),
+    [
+        ("openai", "openai-key", "https://api.openai.com/v1", True),
+        ("openai", "", "https://api.openai.com/v1", False),
+        ("custom", "", "http://127.0.0.1:11434/v1", True),
+        ("custom", "", "", False),
+        ("litellm", "", "", True),
+    ],
+)
+def test_llm_configuration_readiness(monkeypatch, provider, api_key, base_url, expected):
+    service = LLMService(provider=provider)
+    monkeypatch.setattr(service, "get_api_key", lambda selected=None: api_key)
+    monkeypatch.setattr(service, "get_base_url", lambda selected=None: base_url)
+
+    assert service.is_configured() is expected
+
+
+def test_custom_provider_can_call_without_api_key_when_base_url_is_configured(monkeypatch):
+    captured = {}
+    service = LLMService(provider="custom")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "")
+    monkeypatch.setattr(service, "get_base_url", lambda provider=None: "http://127.0.0.1:11434/v1")
+
+    def fake_call(messages, model, temperature, api_key, base_url, timeout, use_json_mode=True):
+        captured.update({"model": model, "api_key": api_key, "base_url": base_url})
+        return "ok"
+
+    monkeypatch.setattr(service, "_call_openai_compatible", fake_call)
+
+    out = service.call_llm_api(
+        [{"role": "user", "content": "hello"}],
+        model="local-model",
+        try_alternative_providers=False,
+        use_json_mode=False,
+    )
+
+    assert out == "ok"
+    assert captured == {
+        "model": "local-model",
+        "api_key": "",
+        "base_url": "http://127.0.0.1:11434/v1",
+    }
+
+
+def test_litellm_stream_can_run_without_litellm_api_key(monkeypatch):
+    service = LLMService(provider="litellm")
+    monkeypatch.setattr(service, "get_api_key", lambda provider=None: "")
+    monkeypatch.setattr(service, "get_base_url", lambda provider=None: "")
+    monkeypatch.setattr(service, "call_llm_api", lambda *args, **kwargs: "streamed")
+
+    assert list(service.stream_llm_api([{"role": "user", "content": "hello"}])) == ["streamed"]
+
+
 def test_litellm_sdk_error_is_wrapped(monkeypatch):
     class FakeLiteLLM:
         @staticmethod

@@ -37,8 +37,8 @@ def get_market_indicators():
         min_price, max_price: Numeric price bounds
         sort_by: 'score' (default) / 'newest' / 'hot' / 'price_asc' /
                  'price_desc' / 'rating'.
-                 'score' sorts by the composite multi-factor backtest score
-                 (see services/experiment/scoring.py) and is now the
+                 'score' sorts by the composite Strategy API V2 backtest score
+                 (see services/community_kpis.py) and is now the
                  default — putting genuinely well-performing indicators
                  at the top of the marketplace, not just the newest ones.
     """

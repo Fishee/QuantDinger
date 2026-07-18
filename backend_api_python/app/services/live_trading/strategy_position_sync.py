@@ -22,9 +22,6 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_FILL_LEDGER_BOT_TYPES = frozenset({"grid", "martingale", "dca"})
-
-
 def strategy_uses_fill_ledger(strategy_config: Dict[str, Any]) -> bool:
     """
     Strategies whose L3 ledger is maintained by fill application, not exchange
@@ -32,17 +29,7 @@ def strategy_uses_fill_ledger(strategy_config: Dict[str, Any]) -> bool:
     """
     sc = strategy_config if isinstance(strategy_config, dict) else {}
     tc = sc.get("trading_config") if isinstance(sc.get("trading_config"), dict) else {}
-    bot_type = str(
-        sc.get("bot_type") or tc.get("bot_type") or ""
-    ).strip().lower()
-    if bot_type == "grid":
-        return True
-    stype = str(sc.get("strategy_type") or "").strip()
-    if stype != "ScriptStrategy":
-        return False
-    if bot_type in _FILL_LEDGER_BOT_TYPES:
-        return False
-    return True
+    return str(tc.get("position_ledger") or "exchange").strip().lower() == "fills"
 
 
 def apply_exchange_snapshot_to_strategy_ledger(

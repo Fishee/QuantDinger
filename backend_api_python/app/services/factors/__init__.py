@@ -8,6 +8,14 @@ from app.services.factors.registry import (
     get_factor,
     list_factors,
 )
+from app.services.factors.talib_adapter import (
+    TalibFactorError,
+    assert_talib_catalog_ready,
+    compute_talib_factor,
+    compute_talib_indicator,
+    is_talib_available,
+    list_talib_factors,
+)
 
 __all__ = [
     "FactorDefinition",
@@ -16,4 +24,10 @@ __all__ = [
     "compute_panel_factor",
     "get_factor",
     "list_factors",
+    "TalibFactorError",
+    "assert_talib_catalog_ready",
+    "compute_talib_factor",
+    "compute_talib_indicator",
+    "is_talib_available",
+    "list_talib_factors",
 ]

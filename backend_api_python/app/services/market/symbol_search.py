@@ -211,7 +211,8 @@ def _search_crypto_exchange(
         return []
     try:
         import ccxt  # type: ignore
-        from app.data_sources.crypto import resolve_ccxt_for_live_trading
+        from app.data_sources.crypto import apply_public_ccxt_endpoint_config, resolve_ccxt_for_live_trading
+        from app.config.data_sources import CCXTConfig
 
         now = time.time()
         exchange_id = normalize_exchange_id(exchange_id) or default_crypto_exchange_id()
@@ -223,9 +224,13 @@ def _search_crypto_exchange(
         else:
             ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
             exchange_cls = getattr(ccxt, ccxt_id)
-            config = {"enableRateLimit": True}
+            config = {
+                "enableRateLimit": True,
+                "timeout": max(int(CCXTConfig.TIMEOUT or 0), 30000),
+            }
             if options:
                 config["options"] = options
+            config = apply_public_ccxt_endpoint_config(config, exchange_id)
             ex = exchange_cls(config)
             ex.load_markets()
             markets = []

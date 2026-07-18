@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import importlib
+import re
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -25,44 +27,82 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 29
+    assert len(fresh_module.MCP_TOOL_NAMES) == 25
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
 
 
-def test_ai_optimize_requires_confirmation(fresh_module):
-    out = fresh_module.submit_ai_optimize({"base": {}})
-    assert out.get("error") is True
-    assert out.get("status") == 400
+def test_package_version_matches_pyproject():
+    from quantdinger_mcp import __version__
+
+    root = Path(__file__).resolve().parents[1]
+    project = (root / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version = "([^"]+)"$', project, re.MULTILINE)
+    assert match
+    assert __version__ == match.group(1)
 
 
-def test_update_strategy_blocks_running_without_trade_scope(fresh_module):
-    out = fresh_module.update_strategy(1, {"status": "running"})
-    assert out.get("error") is True
-    assert out.get("status") == 403
+def test_create_strategy_uses_canonical_deployment_payload(monkeypatch, fresh_module):
+    captured = {}
 
+    def fake_post(path, json=None, headers=None):
+        captured.update(path=path, json=json, headers=headers)
+        return {"strategy_id": 7}
 
-def test_create_strategy_rejects_legacy_indicator_strategy(fresh_module):
+    monkeypatch.setattr(fresh_module, "_post", fake_post)
     out = fresh_module.create_strategy(
-        "Legacy indicator strategy",
-        "Crypto",
-        {"symbol": "BTC/USDT"},
-        strategy_type="IndicatorStrategy",
+        "BTC momentum",
+        12,
+        25000,
+        execution_mode="live",
+        credential_id=5,
+        leverage_enabled=True,
+        leverage=2,
+        params={"lookback": 40},
+        position_side="long",
+        account_risk={"maxDrawdownPct": 10},
     )
-    assert out.get("error") is True
-    assert out.get("status") == 400
-    assert "ScriptStrategy" in out["body"]["message"]
+
+    assert out == {"strategy_id": 7}
+    assert captured["path"] == "/api/agent/v1/strategies"
+    assert captured["json"] == {
+        "name": "BTC momentum",
+        "sourceId": 12,
+        "initialCapital": 25000.0,
+        "executionMode": "live",
+        "credentialId": 5,
+        "leverageEnabled": True,
+        "leverage": 2.0,
+        "params": {"lookback": 40},
+        "positionSide": "long",
+        "accountRisk": {"maxDrawdownPct": 10},
+    }
 
 
-def test_create_strategy_requires_script_code_or_source_id(fresh_module):
-    out = fresh_module.create_strategy(
-        "Empty script strategy",
+def test_quick_order_forwards_native_protection(monkeypatch, fresh_module):
+    captured = {}
+
+    monkeypatch.setattr(fresh_module, "_get", lambda path, params=None: {"paper_only": True})
+
+    def fake_post(path, json=None, headers=None):
+        captured.update(path=path, json=json, headers=headers)
+        return {"status": "filled"}
+
+    monkeypatch.setattr(fresh_module, "_post", fake_post)
+    out = fresh_module.place_quick_order(
         "Crypto",
-        {"symbol": "BTC/USDT"},
+        "BTC/USDT",
+        "buy",
+        0.01,
+        tp_price=70000,
+        sl_price=60000,
+        confirm_order=True,
     )
-    assert out.get("error") is True
-    assert out.get("status") == 400
+
+    assert out == {"status": "filled"}
+    assert captured["json"]["tp_price"] == 70000.0
+    assert captured["json"]["sl_price"] == 60000.0
 
 
 def test_stop_strategy_requires_confirmation(fresh_module):
@@ -85,7 +125,7 @@ def test_indicator_code_size_rejected_in_mcp(monkeypatch, fresh_module):
         fresh_module.validate_indicator_code(huge)
 
 
-def test_submit_backtest_uses_script_strategy_payload(monkeypatch, fresh_module):
+def test_submit_backtest_uses_strategy_v2_payload(monkeypatch, fresh_module):
     captured = {}
 
     def fake_post(path, json=None, headers=None):
@@ -96,22 +136,20 @@ def test_submit_backtest_uses_script_strategy_payload(monkeypatch, fresh_module)
 
     monkeypatch.setattr(fresh_module, "_post", fake_post)
     out = fresh_module.submit_backtest(
-        "def on_init(ctx):\n    pass\n\ndef on_bar(ctx, bar):\n    pass\n",
-        "Crypto",
-        "BTC/USDT",
-        "1H",
+        "def initialize(context):\n    context.set_universe(['USStock:SPY'])\n\ndef handle_data(context, data):\n    pass\n",
         "2024-01-01",
         "2024-06-30",
-        script_params={"fast": 10},
-        market_type="swap",
+        params={"fast": 10},
         idempotency_key="same-key",
     )
 
     assert out == {"job_id": "job-test"}
     assert captured["path"] == "/api/agent/v1/backtest/run"
-    assert captured["json"]["script_params"] == {"fast": 10}
-    assert "indicator_params" not in captured["json"]
-    assert captured["json"]["market_type"] == "swap"
+    assert captured["json"]["params"] == {"fast": 10}
+    assert set(captured["json"]) == {
+        "code", "startDate", "endDate", "initialCapital", "commission",
+        "leverageEnabled", "leverage", "params",
+    }
     assert captured["headers"] == {"Idempotency-Key": "same-key"}
 
 

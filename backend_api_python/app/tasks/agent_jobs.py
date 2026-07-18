@@ -13,9 +13,6 @@ from app.celery_app import celery_app
 SUPPORTED_KINDS = frozenset(
     {
         "backtest",
-        "experiment_pipeline",
-        "structured_tune",
-        "ai_optimize",
     }
 )
 
@@ -31,22 +28,6 @@ def _execute(kind: str, payload: dict, on_progress):
 
         return _run_backtest(request_payload)
 
-    from app.services.experiment.runner import ExperimentRunnerService
-
-    runner = ExperimentRunnerService()
-    user_id = int(request_payload.pop("__user_id", 1))
-    if kind == "experiment_pipeline":
-        return runner.run_pipeline(user_id=user_id, payload=request_payload)
-    if kind == "structured_tune":
-        return runner.run_structured_tune(user_id=user_id, payload=request_payload)
-    if kind == "ai_optimize":
-        return runner.run_ai_pipeline(
-            user_id=user_id,
-            payload=request_payload,
-            on_progress=lambda value: on_progress(
-                value if isinstance(value, dict) else {"value": value}
-            ),
-        )
     raise ValueError(f"Unsupported durable agent job kind: {kind}")
 
 

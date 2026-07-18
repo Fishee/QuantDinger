@@ -189,6 +189,15 @@ class LLMService:
             return model
         return self.get_default_model(provider)
 
+    def is_configured(self, provider: LLMProvider = None) -> bool:
+        """Return whether the provider has enough configuration to make a request."""
+        p = provider or self.provider
+        if (self.get_api_key(p) or "").strip():
+            return True
+        if p == LLMProvider.CUSTOM:
+            return bool((self.get_base_url(p) or "").strip())
+        return p == LLMProvider.LITELLM
+
     # Legacy properties for backward compatibility
     @property
     def api_key(self):
@@ -628,11 +637,7 @@ class LLMService:
                 explicit_provider = None
         api_key = (self.get_api_key(p) or "").strip()
         base_url = (self.get_base_url(p) or "").strip()
-        # Local OpenAI-compatible servers (e.g. Ollama) often use no API key when base_url is set.
-        # LiteLLM reads provider-specific env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) directly.
-        custom_ok_without_key = (p == LLMProvider.CUSTOM and bool(base_url)) or p == LLMProvider.LITELLM
-
-        if not api_key and not custom_ok_without_key:
+        if not self.is_configured(p):
             # If provider is explicitly configured by user, don't silently switch.
             if explicit_provider is not None and p == explicit_provider:
                 if p == LLMProvider.CUSTOM:
@@ -652,10 +657,9 @@ class LLMService:
                         p = alt_provider
                         api_key = (self.get_api_key(p) or "").strip()
                         base_url = (self.get_base_url(p) or "").strip()
-                        custom_ok_without_key = p == LLMProvider.CUSTOM and bool(base_url)
                         break
             
-            if not api_key and not custom_ok_without_key:
+            if not self.is_configured(p):
                 raise ValueError(f"API key not configured for provider: {p.value}. Please configure at least one LLM provider API key.")
 
         if p == LLMProvider.CUSTOM and not base_url:
@@ -754,8 +758,7 @@ class LLMService:
         p = self.provider
         api_key = (self.get_api_key(p) or "").strip()
         base_url = (self.get_base_url(p) or "").strip()
-        custom_ok_without_key = (p == LLMProvider.CUSTOM and bool(base_url))
-        if not api_key and not custom_ok_without_key:
+        if not self.is_configured(p):
             raise ValueError(f"API key not configured for provider: {p.value}. Please set {p.value.upper()}_API_KEY in settings.")
         if p == LLMProvider.GOOGLE:
             yield self.call_llm_api(messages, model=model, temperature=temperature, use_json_mode=False)

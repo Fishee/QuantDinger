@@ -28,7 +28,8 @@ my_indicator_description = "{safe_desc}"
 def edge(s):
     """Return True only on the bar where a condition flips from false to true."""
     s = s.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
+    previous = s.shift(1, fill_value=False).astype(bool)
+    return s & ~previous
 
 
 fast_period = int(params.get("fast_period", 10))

@@ -13,7 +13,7 @@ class FakeRepository:
         self.status = status
         self.commands = []
 
-    def enqueue(self, *, strategy_id, command_type, **_kwargs):
+    def enqueue(self, *, strategy_id, command_type, **kwargs):
         command = StrategyCommand(
             id=len(self.commands) + 1,
             strategy_id=int(strategy_id),
@@ -21,7 +21,7 @@ class FakeRepository:
             command_type=command_type,
             status=self.status,
             idempotency_key=f"key-{len(self.commands) + 1}",
-            payload={},
+            payload=dict(kwargs.get("payload") or {}),
         )
         self.commands.append(command)
         return command
@@ -29,6 +29,9 @@ class FakeRepository:
     def get(self, command_id):
         command = self.commands[int(command_id) - 1]
         return replace(command, status=self.status, error_message="executor failed")
+
+    def has_active_strategy_lease(self, strategy_id):
+        return int(strategy_id) == 42
 
 
 def test_start_is_accepted_while_worker_is_processing():
@@ -39,7 +42,7 @@ def test_start_is_accepted_while_worker_is_processing():
     running, detail = client.wait_strategy_running(42, timeout=0)
 
     assert running is True
-    assert detail == ""
+    assert detail == "strategyV2.startQueued"
     assert repository.commands[0].command_type == "start"
 
 
@@ -61,3 +64,22 @@ def test_stop_uses_durable_command(monkeypatch):
 
     assert client.stop_strategy(9, persist_status=False) is True
     assert repository.commands[0].command_type == "stop"
+
+
+def test_is_running_uses_durable_runtime_lease():
+    client = StrategyCommandClient(FakeRepository())
+
+    assert client.is_running(42) is True
+    assert client.is_running(7) is False
+
+
+def test_stop_policy_forwards_close_positions(monkeypatch):
+    repository = FakeRepository(status="succeeded")
+    client = StrategyCommandClient(repository)
+    monkeypatch.setenv("STRATEGY_COMMAND_STOP_WAIT_SEC", "0")
+
+    result = client.stop_strategy_with_policy(9, close_positions=True)
+
+    assert result["success"] is True
+    assert result["close_requested"] is True
+    assert repository.commands[0].payload == {"close_positions": True}

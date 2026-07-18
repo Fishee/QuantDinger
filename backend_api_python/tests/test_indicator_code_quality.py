@@ -67,7 +67,7 @@ output = {'name': 'T', 'plots': [], 'signals': []}
     assert match[0]["severity"] == "error"
 
 
-def test_legacy_leverage_line_not_flagged_unknown():
+def test_strategy_annotation_is_rejected_for_chart_indicators():
     code = """
 my_indicator_name = "T"
 my_indicator_description = "D"
@@ -76,11 +76,10 @@ df = df.copy()
 output = {'name': 'T', 'plots': [], 'signals': []}
 """
     hints = analyze_indicator_code_quality(code)
-    assert not any(h["code"] == "UNKNOWN_STRATEGY_KEY" for h in hints)
     assert any(h["code"] == "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR" for h in hints)
 
 
-def test_unknown_strategy_keys_are_no_longer_parsed_on_indicators():
+def test_strategy_timing_annotation_is_rejected_for_chart_indicators():
     code = """
 my_indicator_name = "T"
 my_indicator_description = "D"
@@ -89,7 +88,6 @@ df = df.copy()
 output = {'name': 'T', 'plots': [], 'signals': []}
 """
     hints = analyze_indicator_code_quality(code)
-    assert not any(h["code"] == "UNKNOWN_STRATEGY_KEY" for h in hints)
     assert any(h["code"] == "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR" for h in hints)
 
 
@@ -125,7 +123,7 @@ def test_declared_params_read_via_params_helper_is_ok():
 my_indicator_name = "T"
 my_indicator_description = "D"
 # @param fast_period int 10 Fast MA
-# @param strict_mode bool true Strict mode
+# @param confirmation_mode bool true Confirmation mode
 try:
     params
 except NameError:
@@ -138,10 +136,10 @@ def _param(name, default, cast):
         return default
 
 fast_period = _param("fast_period", 10, int)
-strict_mode = _param("strict_mode", True, bool)
+confirmation_mode = _param("confirmation_mode", True, bool)
 df = df.copy()
 ma = df['close'].rolling(window=fast_period).mean()
-output = {'name': 'T', 'plots': [], 'signals': [], 'calculatedVars': {'strict': strict_mode}}
+output = {'name': 'T', 'plots': [], 'signals': [], 'calculatedVars': {'confirmation': confirmation_mode}}
 """
     hints = analyze_indicator_code_quality(code)
     assert not any(h["code"] == "DECLARED_PARAMS_NOT_READ_VIA_PARAMS_GET" for h in hints)
@@ -151,8 +149,6 @@ def test_four_way_columns_no_missing_buy_sell_warn():
     code = """
 my_indicator_name = "T"
 my_indicator_description = "D"
-# @strategy stopLossPct 0.02
-# @strategy takeProfitPct 0.04
 df = df.copy()
 df['open_long'] = False
 df['close_long'] = False
@@ -164,7 +160,6 @@ output = {'name': 'T', 'plots': [], 'signals': []}
     codes = {h["code"] for h in hints}
     assert "MISSING_BUY_SELL_COLUMNS" not in codes
     assert "EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR" in codes
-    assert "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR" in codes
 
 
 def test_where_none_signal_markers_warned():

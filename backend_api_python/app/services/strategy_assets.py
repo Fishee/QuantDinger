@@ -11,7 +11,6 @@ from typing import Any, Dict, List
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
-from app.services.portfolio_strategy_examples import list_portfolio_strategy_examples
 
 logger = get_logger(__name__)
 
@@ -48,39 +47,8 @@ class StrategyAssetService:
     def list_assets(self, user_id: int) -> List[Dict[str, Any]]:
         assets: List[Dict[str, Any]] = []
         assets.extend(self._list_script_sources(user_id))
-        assets.extend(self._list_portfolio_examples())
         assets.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
         return assets
-
-    @staticmethod
-    def _list_portfolio_examples() -> List[Dict[str, Any]]:
-        return [
-            {
-                "asset_key": f"portfolio_strategy:{item['id']}",
-                "asset_type": "portfolio_strategy",
-                "storage": "builtin_portfolio_example",
-                "id": item["id"],
-                "source_id": item["id"],
-                "name": item["template_key"],
-                "description": "",
-                "name_i18n_key": item["name_i18n_key"],
-                "description_i18n_key": item["description_i18n_key"],
-                "code": item["code"],
-                "code_hidden": 0,
-                "is_purchased": 0,
-                "is_published": 0,
-                "template_key": item["template_key"],
-                "param_schema": {},
-                "metadata": {"builtin_example": True},
-                "can_edit_code": False,
-                "can_backtest": True,
-                "can_live": False,
-                "engine": "portfolio_strategy",
-                "created_at": "",
-                "updated_at": "",
-            }
-            for item in list_portfolio_strategy_examples()
-        ]
 
     def _list_script_sources(self, user_id: int) -> List[Dict[str, Any]]:
         with get_db_connection() as db:

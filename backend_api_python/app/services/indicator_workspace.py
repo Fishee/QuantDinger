@@ -13,35 +13,14 @@ from app.utils.safe_exec import validate_code_safety
 
 logger = get_logger(__name__)
 
-_NON_INDICATOR_ASSET_TYPES = frozenset({"script_template", "bot_preset"})
-
-
-def is_script_strategy_code(code: str) -> bool:
-    """True when code defines ``on_bar(ctx, bar)`` script-strategy handlers."""
-    raw = (code or "").strip()
-    if not raw:
-        return False
-    return bool(re.search(r"^\s*def\s+on_bar\s*\(", raw, re.MULTILINE))
+_NON_INDICATOR_ASSET_TYPES = frozenset({"script_template"})
 
 
 def is_indicator_ide_listable(*, code: str = "", asset_type: Optional[str] = "indicator") -> bool:
     """Whether a ``qd_indicator_codes`` row belongs in the indicator IDE sidebar."""
+    del code
     at = (asset_type or "indicator").strip().lower()
-    if at in _NON_INDICATOR_ASSET_TYPES:
-        return False
-    if is_script_strategy_code(code):
-        return False
-    return True
-
-
-def resolve_indicator_asset_type(code: str, asset_type: Optional[str] = "indicator") -> str:
-    """Map script-strategy source to ``script_template`` so it stays out of indicator IDE."""
-    at = (asset_type or "indicator").strip().lower()
-    if at in _NON_INDICATOR_ASSET_TYPES:
-        return at
-    if is_script_strategy_code(code):
-        return "script_template"
-    return "indicator"
+    return at not in _NON_INDICATOR_ASSET_TYPES
 
 
 def extract_indicator_meta_from_code(code: str) -> Dict[str, str]:
@@ -70,7 +49,7 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
             "2. Write a full Python chart-only indicator script (not natural language) following required_fields.",
             "3. POST /api/agent/v1/indicators/validate to check sandbox + output contract.",
             "4. POST /api/agent/v1/indicators to save into the user's indicator library (scope W).",
-            "5. If the user wants backtest/live trading, use the separate Indicator-to-Strategy workflow to convert visible indicator logic into a ScriptStrategy. Do not add execution behavior to indicator code.",
+            "5. If the user wants backtest/live trading, use the separate Indicator-to-Strategy workflow. Do not add execution behavior to indicator code.",
         ],
         "required_fields": {
             "globals": ["my_indicator_name", "my_indicator_description"],
@@ -85,7 +64,7 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
         "forbidden": [
             "Execution/order columns: open_long, close_long, open_short, close_short, add_long, add_short, reduce_long, reduce_short",
             "# @strategy, # signal_form, # exit_owner, # flip_mode, # timeframe, risk, leverage, trade direction, stop loss, take profit, trailing stop",
-            "ScriptStrategy / on_bar(ctx, bar) / live-trading handlers",
+            "Strategy lifecycle or live-trading handlers",
             "Backtest or broker/account configuration inside indicator code",
             "Natural language instead of Python source",
             "import os/sys/requests/socket/subprocess/threading/sqlite3/multiprocessing",
@@ -143,17 +122,10 @@ def save_user_indicator(
     if not raw:
         raise ValueError("code is required")
 
-    asset_type = resolve_indicator_asset_type(raw)
-    if asset_type == "script_template":
-        from app.routes.strategy import _validate_strategy_code_internal
-
-        validation = _validate_strategy_code_internal(raw)
-        if not validation.get("success"):
-            raise ValueError(validation.get("message") or "Unsafe script template code")
-    else:
-        is_safe, unsafe_reason = validate_code_safety(raw)
-        if not is_safe:
-            raise ValueError(f"Unsafe indicator code: {unsafe_reason}")
+    asset_type = "indicator"
+    is_safe, unsafe_reason = validate_code_safety(raw)
+    if not is_safe:
+        raise ValueError(f"Unsafe indicator code: {unsafe_reason}")
 
     meta = extract_indicator_meta_from_code(raw)
     name = (name or meta.get("name") or "").strip() or "Custom Indicator"
@@ -163,12 +135,6 @@ def save_user_indicator(
 
     with get_db_connection() as db:
         cur = db.cursor()
-        try:
-            cur.execute(
-                "ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) DEFAULT 'indicator'"
-            )
-        except Exception:
-            pass
         if iid > 0:
             cur.execute(
                 """
@@ -272,19 +238,11 @@ def link_indicator_config(
     *,
     auto_save: bool = True,
 ) -> Dict[str, Any]:
-    """Ensure ``indicator_config`` has ``indicator_id`` when code is embedded.
-
-    Strategies store a JSON snapshot in ``indicator_config``; the indicator IDE
-    list reads ``qd_indicator_codes``. Agent-created strategies historically
-    only set ``indicator_code``, so indicators never appeared in the library.
-    """
+    """Ensure an embedded indicator source has a persisted indicator ID."""
     ic = dict(indicator_config or {})
     code = (ic.get("indicator_code") or ic.get("code") or "").strip()
     if not code or not auto_save:
         return ic
-    if is_script_strategy_code(code):
-        return ic
-
     existing_id = ic.get("indicator_id")
     try:
         existing_id = int(existing_id) if existing_id not in (None, "", 0) else 0

@@ -327,29 +327,6 @@ components:
       - code
       - new_password
       additionalProperties: false
-    StrategyStatusData:
-      type: object
-      properties:
-        status:
-          type: string
-          nullable: true
-      additionalProperties: false
-    StrategyStatusResponse:
-      type: object
-      properties:
-        code:
-          type: integer
-        msg:
-          type: string
-        data:
-          anyOf:
-          - type: object
-            nullable: true
-          - $ref: '#/components/schemas/StrategyStatusData'
-      required:
-      - code
-      - msg
-      additionalProperties: false
     CredentialCreateRequest:
       type: object
       properties:
@@ -403,6 +380,26 @@ components:
         testnet:
           type: boolean
           default: false
+        environment:
+          type: string
+          default: ''
+          maxLength: 32
+        network:
+          type: string
+          default: ''
+          maxLength: 32
+        market_scope:
+          type: string
+          default: ''
+          enum:
+          - ''
+          - spot
+          - swap
+          - both
+        marketScope:
+          type: string
+          default: ''
+          maxLength: 32
         ibkr_host:
           type: string
           default: 127.0.0.1
@@ -601,8 +598,8 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-    UNPROCESSABLE_ENTITY:
-      description: Unprocessable Entity
+    UNPROCESSABLE_CONTENT:
+      description: Unprocessable Content
       content:
         application/json:
           schema:
@@ -642,8 +639,6 @@ tags:
   description: System and brand settings (Mixed)
 - name: Billing
   description: Membership and USDT billing (Internal)
-- name: Experiment
-  description: Strategy tuning experiments (Internal)
 - name: FastAnalysis
   description: Fast AI analysis (Public)
 - name: GlobalMarket
@@ -832,7 +827,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '200':
           description: OK
           content:
@@ -942,7 +937,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '200':
           description: OK
           content:
@@ -981,7 +976,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -1016,7 +1011,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -1803,6 +1798,8 @@ paths:
 
         execution_mode: str (optional, live/signal; omit or all for any)
 
+        strategy_class: str (optional, cta/portfolio/robot; omit or all for any)
+
         search: str (optional, search by strategy name/symbol/username/id)
 
         strategy_id: int (optional, exact strategy id)
@@ -2049,7 +2046,7 @@ paths:
       operationId: postApiBacktestRun
       summary: Post Api Backtest Run
       x-visibility: internal
-  /api/backtest/structured-tune:
+  /api/backtest/factor-research:
     post:
       responses:
         '400':
@@ -2066,8 +2063,48 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       tags:
       - Strategy
-      operationId: postApiBacktestStructuredTune
-      summary: Post Api Backtest Structured Tune
+      operationId: postApiBacktestFactorResearch
+      summary: Post Api Backtest Factor Research
+      x-visibility: internal
+  /api/backtest/factor-research/history:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiBacktestFactorResearchHistory
+      summary: Get Api Backtest Factor Research History
+      x-visibility: internal
+  /api/backtest/factor-research/get:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiBacktestFactorResearchGet
+      summary: Get Api Backtest Factor Research Get
       x-visibility: internal
   /api/backtest/tune:
     post:
@@ -2561,251 +2598,6 @@ paths:
       schema:
         type: integer
         minimum: 0
-  /api/portfolio-deployments:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: getApiPortfolioDeployments
-      summary: Get Api Portfolio Deployments
-      x-visibility: internal
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: postApiPortfolioDeployments
-      summary: Post Api Portfolio Deployments
-      x-visibility: internal
-  /api/portfolio-deployments/{deployment_id}:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: getApiPortfolioDeploymentsDeploymentId
-      summary: Get Api Portfolio Deployments Deployment Id
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-    put:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: putApiPortfolioDeploymentsDeploymentId
-      summary: Put Api Portfolio Deployments Deployment Id
-      x-visibility: internal
-    delete:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: deleteApiPortfolioDeploymentsDeploymentId
-      summary: Delete Api Portfolio Deployments Deployment Id
-      x-visibility: internal
-  /api/portfolio-deployments/{deployment_id}/plans:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: getApiPortfolioDeploymentsDeploymentIdPlans
-      summary: Get Api Portfolio Deployments Deployment Id Plans
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-  /api/portfolio-deployments/{deployment_id}/orders/{order_id}/acknowledge:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: postApiPortfolioDeploymentsDeploymentIdOrdersOrderIdAcknowledge
-      summary: Post Api Portfolio Deployments Deployment Id Orders Order Id Acknowledge
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-    - in: path
-      name: order_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-  /api/portfolio-deployments/{deployment_id}/start:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: postApiPortfolioDeploymentsDeploymentIdStart
-      summary: Post Api Portfolio Deployments Deployment Id Start
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-  /api/portfolio-deployments/{deployment_id}/stop:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: postApiPortfolioDeploymentsDeploymentIdStop
-      summary: Post Api Portfolio Deployments Deployment Id Stop
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-  /api/portfolio-deployments/{deployment_id}/run:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Portfolio
-      operationId: postApiPortfolioDeploymentsDeploymentIdRun
-      summary: Post Api Portfolio Deployments Deployment Id Run
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: deployment_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
   /api/factors:
     get:
       responses:
@@ -2872,6 +2664,46 @@ paths:
       - Factor
       operationId: postApiFactorsResearch
       summary: Post Api Factors Research
+      x-visibility: internal
+  /api/factors/fundamentals/coverage:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Factor
+      operationId: getApiFactorsFundamentalsCoverage
+      summary: Get Api Factors Fundamentals Coverage
+      x-visibility: internal
+  /api/factors/fundamentals/sync:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Factor
+      operationId: postApiFactorsFundamentalsSync
+      summary: Post Api Factors Fundamentals Sync
       x-visibility: internal
   /api/market-modules/:
     get:
@@ -3665,6 +3497,271 @@ paths:
       schema:
         type: integer
         minimum: 0
+  /api/strategies/script-templates:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesScriptTemplates
+      summary: Get Api Strategies Script Templates
+      x-visibility: internal
+  /api/strategies/script-sources:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesScriptSources
+      summary: Get Api Strategies Script Sources
+      x-visibility: internal
+  /api/strategies/script-sources/detail:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesScriptSourcesDetail
+      summary: Get Api Strategies Script Sources Detail
+      x-visibility: internal
+  /api/strategies/script-sources/create:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesCreate
+      summary: Post Api Strategies Script Sources Create
+      x-visibility: internal
+  /api/strategies/script-sources/update:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesUpdate
+      summary: Post Api Strategies Script Sources Update
+      x-visibility: internal
+    put:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: putApiStrategiesScriptSourcesUpdate
+      summary: Put Api Strategies Script Sources Update
+      x-visibility: internal
+  /api/strategies/script-sources/compile:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesCompile
+      summary: Post Api Strategies Script Sources Compile
+      x-visibility: internal
+  /api/strategies/script-sources/delete:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesDelete
+      summary: Post Api Strategies Script Sources Delete
+      x-visibility: internal
+    delete:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: deleteApiStrategiesScriptSourcesDelete
+      summary: Delete Api Strategies Script Sources Delete
+      x-visibility: internal
+  /api/strategies/script-sources/versions:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesScriptSourcesVersions
+      summary: Get Api Strategies Script Sources Versions
+      x-visibility: internal
+  /api/strategies/script-sources/versions/{version_id}:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesScriptSourcesVersionsVersionId
+      summary: Get Api Strategies Script Sources Versions Version Id
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: version_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/strategies/script-sources/versions/restore:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesVersionsRestore
+      summary: Post Api Strategies Script Sources Versions Restore
+      x-visibility: internal
+  /api/strategies/script-sources/publish:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesScriptSourcesPublish
+      summary: Post Api Strategies Script Sources Publish
+      x-visibility: internal
   /api/account/snapshot:
     get:
       responses:
@@ -3705,6 +3802,26 @@ paths:
       - Account
       operationId: getApiAccountPositions
       x-visibility: internal
+  /api/strategy-assets:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Return executable script strategy assets.
+      tags:
+      - strategy
+      operationId: getApiStrategyAssets
+      x-visibility: internal
   /api/strategies/dry-run-deviation:
     get:
       responses:
@@ -3724,6 +3841,86 @@ paths:
       tags:
       - Strategy
       operationId: getApiStrategiesDryRunDeviation
+      x-visibility: internal
+  /api/strategies/executors/templates:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesExecutorsTemplates
+      summary: Get Api Strategies Executors Templates
+      x-visibility: internal
+  /api/strategies/executors/preview:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesExecutorsPreview
+      summary: Post Api Strategies Executors Preview
+      x-visibility: internal
+  /api/strategies/executors/generate:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesExecutorsGenerate
+      summary: Post Api Strategies Executors Generate
+      x-visibility: internal
+  /api/strategies/executors/create:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategiesExecutorsCreate
+      summary: Post Api Strategies Executors Create
       x-visibility: internal
   /api/strategies/grid-resting-orders:
     get:
@@ -3985,351 +4182,6 @@ paths:
       - Strategy
       operationId: getApiStrategiesReviewReportHistory
       x-visibility: internal
-  /api/strategy-assets:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Return executable script strategy assets.
-      tags:
-      - strategy
-      operationId: getApiStrategyAssets
-      x-visibility: internal
-  /api/strategies/executors/templates:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesExecutorsTemplates
-      summary: Get Api Strategies Executors Templates
-      x-visibility: internal
-  /api/strategies/executors/preview:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesExecutorsPreview
-      summary: Post Api Strategies Executors Preview
-      x-visibility: internal
-  /api/strategies/executors/generate:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesExecutorsGenerate
-      summary: Post Api Strategies Executors Generate
-      x-visibility: internal
-  /api/strategies/executors/create:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesExecutorsCreate
-      summary: Post Api Strategies Executors Create
-      x-visibility: internal
-  /api/strategies/script-templates:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesScriptTemplates
-      summary: Get Api Strategies Script Templates
-      x-visibility: internal
-  /api/strategies/script-sources:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesScriptSources
-      summary: Get Api Strategies Script Sources
-      x-visibility: internal
-  /api/strategies/script-sources/detail:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesScriptSourcesDetail
-      summary: Get Api Strategies Script Sources Detail
-      x-visibility: internal
-  /api/strategies/script-sources/create:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesScriptSourcesCreate
-      summary: Post Api Strategies Script Sources Create
-      x-visibility: internal
-  /api/strategies/script-sources/update:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesScriptSourcesUpdate
-      summary: Post Api Strategies Script Sources Update
-      x-visibility: internal
-    put:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: putApiStrategiesScriptSourcesUpdate
-      summary: Put Api Strategies Script Sources Update
-      x-visibility: internal
-  /api/strategies/script-sources/delete:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesScriptSourcesDelete
-      summary: Post Api Strategies Script Sources Delete
-      x-visibility: internal
-    delete:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: deleteApiStrategiesScriptSourcesDelete
-      summary: Delete Api Strategies Script Sources Delete
-      x-visibility: internal
-  /api/strategies/script-sources/versions:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesScriptSourcesVersions
-      summary: Get Api Strategies Script Sources Versions
-      x-visibility: internal
-  /api/strategies/script-sources/versions/{version_id}:
-    get:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: getApiStrategiesScriptSourcesVersionsVersionId
-      summary: Get Api Strategies Script Sources Versions Version Id
-      x-visibility: internal
-    parameters:
-    - in: path
-      name: version_id
-      required: true
-      schema:
-        type: integer
-        minimum: 0
-  /api/strategies/script-sources/versions/restore:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesScriptSourcesVersionsRestore
-      summary: Post Api Strategies Script Sources Versions Restore
-      x-visibility: internal
-  /api/strategies/script-sources/publish:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesScriptSourcesPublish
-      summary: Post Api Strategies Script Sources Publish
-      x-visibility: internal
   /api/strategies:
     get:
       responses:
@@ -4345,12 +4197,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: List strategies for the current user.
       tags:
       - Strategy
       operationId: getApiStrategies
+      summary: Get Api Strategies
       x-visibility: internal
-  /api/strategies/detail:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: postApiStrategies
+      summary: Post Api Strategies
+      x-visibility: internal
+  /api/strategies/{strategy_id}:
     get:
       responses:
         '400':
@@ -4367,138 +4238,16 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       tags:
       - Strategy
-      operationId: getApiStrategiesDetail
-      summary: Get Api Strategies Detail
+      operationId: getApiStrategiesStrategyId
+      summary: Get Api Strategies Strategy Id
       x-visibility: internal
-  /api/strategies/create:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesCreate
-      summary: Post Api Strategies Create
-      x-visibility: internal
-  /api/strategies/batch-create:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Batch create strategies (multiple symbols)
-      description: 'Request body:
-
-        strategy_name: Base strategy name
-
-        symbols: Array of symbols, e.g. ["Crypto:BTC/USDT", "Crypto:ETH/USDT"]
-
-        ... other strategy config'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesBatchCreate
-      x-visibility: internal
-  /api/strategies/batch-start:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Batch start strategies
-      description: 'Request body:
-
-        strategy_ids: Array of strategy IDs
-
-        or
-
-        strategy_group_id: Strategy group ID'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesBatchStart
-      x-visibility: internal
-  /api/strategies/batch-stop:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Batch stop strategies
-      description: 'Request body:
-
-        strategy_ids: Array of strategy IDs
-
-        or
-
-        strategy_group_id: Strategy group ID'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesBatchStop
-      x-visibility: internal
-  /api/strategies/batch-delete:
-    delete:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Batch delete strategies
-      description: 'Request body:
-
-        strategy_ids: Array of strategy IDs
-
-        or
-
-        strategy_group_id: Strategy group ID'
-      tags:
-      - Strategy
-      operationId: deleteApiStrategiesBatchDelete
-      x-visibility: internal
-  /api/strategies/update:
+    parameters:
+    - in: path
+      name: strategy_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
     put:
       responses:
         '400':
@@ -4515,21 +4264,31 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       tags:
       - Strategy
-      operationId: putApiStrategiesUpdate
-      summary: Put Api Strategies Update
+      operationId: putApiStrategiesStrategyId
+      summary: Put Api Strategies Strategy Id
       x-visibility: internal
-  /api/strategies/delete:
     delete:
-      parameters:
-      - in: query
-        name: id
-        schema:
-          type: integer
-          minimum: 1
-        required: true
       responses:
-        '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: deleteApiStrategiesStrategyId
+      summary: Delete Api Strategies Strategy Id
+      x-visibility: internal
+  /api/strategies/{strategy_id}/start:
+    post:
+      responses:
         '400':
           description: Bad Request
           content:
@@ -4544,74 +4303,17 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       tags:
       - Strategy
-      operationId: deleteApiStrategiesDelete
-      summary: Delete Api Strategies Delete
+      operationId: postApiStrategiesStrategyIdStart
+      summary: Post Api Strategies Strategy Id Start
       x-visibility: internal
-  /api/strategies/stop:
-    post:
-      parameters:
-      - in: query
-        name: id
-        schema:
-          type: integer
-          minimum: 1
-        required: true
-      responses:
-        '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StrategyStatusResponse'
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-      summary: Stop a strategy for the current user.
-      description: 'Params:
-
-        id: Strategy ID'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesStop
-      x-visibility: internal
-  /api/strategies/start:
-    post:
-      parameters:
-      - in: query
-        name: id
-        schema:
-          type: integer
-          minimum: 1
-        required: true
-      responses:
-        '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StrategyStatusResponse'
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-      summary: Start a strategy for the current user.
-      description: 'Params:
-
-        id: Strategy ID'
-      tags:
-      - Strategy
-      operationId: postApiStrategiesStart
-      x-visibility: internal
-  /api/strategies/test-connection:
+    parameters:
+    - in: path
+      name: strategy_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/strategies/{strategy_id}/stop:
     post:
       responses:
         '400':
@@ -4626,16 +4328,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Test exchange connection.
-      description: 'Request body:
-
-        exchange_config: Exchange configuration (may contain credential_id or inline
-        keys)'
       tags:
       - Strategy
-      operationId: postApiStrategiesTestConnection
+      operationId: postApiStrategiesStrategyIdStop
+      summary: Post Api Strategies Strategy Id Stop
       x-visibility: internal
-  /api/strategies/verify-code:
+    parameters:
+    - in: path
+      name: strategy_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/strategies/exchange/test:
     post:
       responses:
         '400':
@@ -4650,12 +4355,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Verify script strategy code syntax and safety.
       tags:
       - Strategy
-      operationId: postApiStrategiesVerifyCode
+      operationId: postApiStrategiesExchangeTest
+      summary: Post Api Strategies Exchange Test
       x-visibility: internal
-  /api/strategies/publish-template:
+  /api/strategies/verify:
     post:
       responses:
         '400':
@@ -4670,12 +4375,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Publish script strategy code to marketplace as script_template asset.
       tags:
       - Strategy
-      operationId: postApiStrategiesPublishTemplate
+      operationId: postApiStrategiesVerify
+      summary: Post Api Strategies Verify
       x-visibility: internal
-  /api/strategies/publish-bot-preset:
+  /api/strategies/generate:
     post:
       responses:
         '400':
@@ -4690,25 +4395,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: 'Deprecated: bot presets are now published as editable script templates.'
       tags:
       - Strategy
-      operationId: postApiStrategiesPublishBotPreset
-      x-visibility: internal
-  /api/strategies/ai-generate:
-    post:
-      responses:
-        '200':
-          description: Server-Sent Events stream
-          content:
-            text/event-stream:
-              schema:
-                type: string
-      summary: Generate strategy code or suggest template parameter updates using
-        AI.
-      tags:
-      - Strategy
-      operationId: postApiStrategiesAiGenerate
+      operationId: postApiStrategiesGenerate
+      summary: Post Api Strategies Generate
       x-visibility: internal
   /api/credentials/desktop-brokers-policy:
     get:
@@ -4779,11 +4469,39 @@ paths:
 
         Uses ipify''s v4-only / v6-only endpoints so each family is detected independently.'
       x-visibility: private
+  /api/credentials/test:
+    post:
+      responses:
+        '422':
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialCreateRequest'
+      summary: Validate credentials against the selected private trading environment.
+      tags:
+      - Credentials
+      operationId: postApiCredentialsTest
+      x-visibility: private
   /api/credentials/create:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '200':
           description: OK
           content:
@@ -4860,7 +4578,7 @@ paths:
         required: true
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -5824,7 +5542,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Get Alpaca open orders.
+      summary: Get Alpaca recent orders or only open orders.
       tags:
       - Alpaca
       operationId: getApiAlpacaOrders
@@ -6104,7 +5822,7 @@ paths:
         \ 'visible' / 'hidden' / empty (all)\nmin_price, max_price: Numeric price\
         \ bounds\nsort_by: 'score' (default) / 'newest' / 'hot' / 'price_asc' /\n\
         \         'price_desc' / 'rating'.\n         'score' sorts by the composite\
-        \ multi-factor backtest score\n         (see services/experiment/scoring.py)\
+        \ Strategy API V2 backtest score\n         (see services/community_kpis.py)\
         \ and is now the\n         default — putting genuinely well-performing indicators\n\
         \         at the top of the marketplace, not just the newest ones."
       tags:
@@ -6820,7 +6538,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -6879,7 +6597,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -6902,16 +6620,16 @@ paths:
       description: "Body JSON:\ncredential_id  (int)    - saved exchange credential\
         \ ID\nsymbol         (str)    - e.g. \"BTC/USDT\"\nside           (str)  \
         \  - \"buy\" or \"sell\"\norder_type     (str)    - \"market\" or \"limit\"\
-        \  (default: market)\namount         (float)  - USDT amount (always in USDT,\
-        \ will be converted to base qty)\nprice          (float)  - limit price (required\
-        \ for limit orders)\nleverage       (int)    - leverage multiplier (default:\
-        \ 1)\n                          - leverage = 1: spot market\n            \
-        \              - leverage > 1: swap (perpetual futures) market\nmarket_type\
-        \    (str)    - \"swap\" / \"spot\" (optional, auto-determined by leverage\
-        \ if not provided)\ntp_price       (float)  - take-profit price (optional,\
-        \ for record only)\nsl_price       (float)  - stop-loss price (optional, for\
-        \ record only)\nsource         (str)    - \"ai_radar\" / \"ai_analysis\" /\
-        \ \"indicator\" / \"manual\""
+        \  (default: market)\namount         (float)  - spot quote amount or swap\
+        \ margin amount in USDT\nprice          (float)  - limit price (required for\
+        \ limit orders)\nleverage       (int)    - leverage multiplier (default: 1)\n\
+        \                          - leverage = 1: spot market\n                 \
+        \         - leverage > 1: swap (perpetual futures) market\nmarket_type   \
+        \ (str)    - \"swap\" / \"spot\" (optional, auto-determined by leverage if\
+        \ not provided)\ntp_price       (float)  - take-profit price (optional, for\
+        \ record only)\nsl_price       (float)  - stop-loss price (optional, for record\
+        \ only)\nsource         (str)    - \"ai_radar\" / \"ai_analysis\" / \"indicator\"\
+        \ / \"manual\""
       tags:
       - QuickTrade
       operationId: postApiQuickTradePlaceOrder
@@ -6967,7 +6685,7 @@ paths:
     post:
       responses:
         '422':
-          $ref: '#/components/responses/UNPROCESSABLE_ENTITY'
+          $ref: '#/components/responses/UNPROCESSABLE_CONTENT'
         '400':
           description: Bad Request
           content:
@@ -7030,48 +6748,4 @@ paths:
       - QuickTrade
       operationId: getApiQuickTradeHistory
       x-visibility: private
-  /api/experiment/ai-optimize:
-    post:
-      responses:
-        '200':
-          description: Server-Sent Events stream
-          content:
-            text/event-stream:
-              schema:
-                type: string
-      summary: LLM-driven multi-round optimization pipeline with SSE progress streaming.
-      description: 'The endpoint returns an SSE stream. Each event is one of:
-
-        - event: progress   (partial update per round)
-
-        - event: done       (final result)
-
-        - event: error      (pipeline failure)'
-      tags:
-      - Experiment
-      operationId: postApiExperimentAiOptimize
-      x-visibility: internal
-  /api/experiment/structured-tune:
-    post:
-      responses:
-        '400':
-          description: Bad Request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanErrorEnvelope'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HumanSuccessEnvelope'
-      summary: Grid or random search over explicit parameterSpace (no LLM).
-      tags:
-      - Experiment
-      operationId: postApiExperimentStructuredTune
-      description: 'Grid or random search over explicit parameterSpace (no LLM).
-
-        Same response shape as ai-optimize-sync for IDE compatibility.'
-      x-visibility: internal
 openapi: 3.0.3

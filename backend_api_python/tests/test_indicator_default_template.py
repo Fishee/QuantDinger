@@ -60,3 +60,10 @@ def test_default_template_executes_in_sandbox():
     executed = env["df"]
     for col in ("open_long", "close_long", "open_short", "close_short"):
         assert col not in executed.columns
+
+
+def test_default_template_uses_boolean_dtype_safe_edge_detection():
+    code = build_default_indicator_template()
+
+    assert "shift(1, fill_value=False).astype(bool)" in code
+    assert "shift(1).fillna(False)" not in code

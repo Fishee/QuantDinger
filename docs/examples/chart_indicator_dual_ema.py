@@ -20,7 +20,8 @@ low = df["low"]
 
 def edge(condition):
     s = condition.fillna(False).astype(bool)
-    return s & ~s.shift(1).fillna(False)
+    previous = s.shift(1, fill_value=False).astype(bool)
+    return s & ~previous
 
 def to_plot_list(series):
     return [None if pd.isna(v) else float(v) for v in series]
@@ -32,8 +33,8 @@ golden = edge(ema_fast > ema_slow)
 death = edge(ema_fast < ema_slow)
 
 if confirm_next_bar:
-    golden = golden.shift(1).fillna(False).astype(bool)
-    death = death.shift(1).fillna(False).astype(bool)
+    golden = golden.shift(1, fill_value=False).astype(bool)
+    death = death.shift(1, fill_value=False).astype(bool)
 
 buy_marks = [
     float(low.iloc[i] * 0.995) if bool(golden.iloc[i]) else None

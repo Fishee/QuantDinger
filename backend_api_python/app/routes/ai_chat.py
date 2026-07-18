@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from flask import Response, g, jsonify, request, stream_with_context
@@ -62,9 +62,28 @@ MAX_IMAGES = 3
 MAX_IMAGE_DATA_URL_CHARS = 4 * 1024 * 1024
 ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
 
+AGENT_RESPONSE_LANGUAGES = {
+    "ar-sa": "Arabic",
+    "de-de": "German",
+    "en-us": "English",
+    "fr-fr": "French",
+    "ja-jp": "Japanese",
+    "ko-kr": "Korean",
+    "ru-ru": "Russian",
+    "th-th": "Thai",
+    "vi-vn": "Vietnamese",
+    "zh-cn": "Simplified Chinese",
+    "zh-tw": "Traditional Chinese",
+}
+
 
 def _now_utc() -> datetime:
     return store_now_utc()
+
+
+def _agent_response_language_name(language: str) -> str:
+    normalized = str(language or "").strip().replace("_", "-").lower()
+    return AGENT_RESPONSE_LANGUAGES.get(normalized, "English")
 
 
 def _json_dumps(value: Any) -> str:
@@ -121,7 +140,12 @@ def _detect_intent(message: str, has_image: bool) -> str:
         return "market_analysis"
     if any(k in text for k in ("多少钱", "价格", "股价", "估值", "市值", "报价", "现价", "最新价", "quote", "valuation")):
         return "market_analysis"
-    if any(k in text for k in ("策略", "indicator", "script", "代码", "code", "write strategy", "生成")):
+    if any(k in text for k in (
+        "策略", "indicator", "script", "代码", "code", "write strategy", "生成",
+        "戦略", "インジケーター", "전략", "지표", "strategie", "indikator",
+        "stratégie", "indicateur", "стратег", "индикатор", "chiến lược", "chỉ báo",
+        "กลยุทธ์", "อินดิเคเตอร์", "استراتيجية", "مؤشر",
+    )):
         return "strategy_build"
     if any(k in text for k in ("诊断", "报错", "错误", "亏损", "日志", "debug", "bug", "why")):
         return "diagnosis"
@@ -134,7 +158,12 @@ def _detect_intent(message: str, has_image: bool) -> str:
     return "general"
 
 
-def _fallback_agent_intent(message: str, has_image: bool, context: dict | None = None) -> dict:
+def _fallback_agent_intent(
+    message: str,
+    has_image: bool,
+    context: dict | None = None,
+    language: str = "zh-CN",
+) -> dict:
     """Conservative intent fallback used only when the configured LLM is unavailable."""
     text = (message or "").lower()
     base_intent = _detect_intent(message, has_image)
@@ -146,9 +175,16 @@ def _fallback_agent_intent(message: str, has_image: bool, context: dict | None =
     if base_intent == "strategy_build":
         should_execute = any(k in text for k in (
             "创建", "生成", "写", "做一个", "能跑", "可运行", "回测", "create",
-            "generate", "build", "write", "runnable", "backtest"
+            "generate", "build", "write", "runnable", "backtest", "作成", "生成して",
+            "만들", "생성", "erstell", "generier", "crée", "génère", "созда",
+            "сгенер", "tạo", "viết", "สร้าง", "เขียน", "أنشئ", "اكتب"
         ))
-        if any(k in text for k in ("指标", "看图", "图表", "indicator", "chart-only", "visual", "overlay")):
+        if any(k in text for k in (
+            "指标", "看图", "图表", "indicator", "chart-only", "visual", "overlay",
+            "インジケーター", "チャート", "지표", "차트", "indikator", "diagramm",
+            "indicateur", "graphique", "индикатор", "график", "chỉ báo", "biểu đồ",
+            "อินดิเคเตอร์", "กราฟ", "مؤشر", "مخطط",
+        )):
             target_type = "indicator"
             workflow = "indicator_ide"
         elif any(k in text for k in ("机器人", "bot", "grid", "dca", "martingale", "网格", "马丁")):
@@ -181,7 +217,7 @@ def _fallback_agent_intent(message: str, has_image: bool, context: dict | None =
             "timeframe": "",
             "strategy_template": "",
         },
-        "skills": [skill.to_public("zh-CN") for skill in match_skills(message, base_intent, limit=5)],
+        "skills": [skill.to_public(language) for skill in match_skills(message, base_intent, limit=5)],
         "next_action": "ask_missing_fields" if required_missing else ("execute_workflow" if should_execute else "answer_chat"),
         "reason": "LLM intent router unavailable; used conservative fallback.",
     }
@@ -263,17 +299,17 @@ def _normalize_agent_intent(raw: dict, message: str, has_image: bool, context: d
 def _classify_agent_intent(message: str, attachments: list[dict], context: dict, language: str) -> dict:
     """Use the configured LLM as the canonical Agent intent router."""
     has_image = bool(attachments)
-    fallback = _fallback_agent_intent(message, has_image, context)
+    fallback = _fallback_agent_intent(message, has_image, context, language)
     system_prompt = (
         "You are the QuantDinger Agent Intent Router. Classify the user's message into a "
         "workflow plan for a global quantitative trading terminal. Return JSON only. "
         "Do not answer the user. Decide whether this is chat/research or an executable "
         "workflow such as indicator creation, strategy creation, backtest, or scheduled analysis. "
         "For creation, use indicator_ide only for chart-only indicators and visual overlays. "
-        "Use script_strategy for executable strategies, backtestable strategies, live strategies, Python ScriptStrategy, grid/DCA, or template-style requests. "
+        "Use script_strategy for executable Strategy API V2 sources, backtestable strategies, live strategies, robots, or template-style requests. "
         "If the user asks to create/build/write/generate a runnable strategy and enough target context "
         "is available, set should_execute=true. If required data is missing, list it in required_missing. "
-        "Support Chinese, English, and mixed multilingual prompts."
+        "Support every configured UI language and mixed multilingual prompts."
     )
     schema = {
         "intent": fallback["intent"],
@@ -485,6 +521,28 @@ def _timeframe_change(klines: list[dict], bars: int) -> float | None:
     return (end - start) / start * 100
 
 
+def _format_kline_time_utc(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    try:
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
     clean = []
     for k in klines or []:
@@ -533,6 +591,7 @@ def _summarize_klines(klines: list[dict], timeframe: str) -> dict:
         "available": True,
         "bars": len(clean),
         "latest_time": last.get("time"),
+        "latest_time_utc": _format_kline_time_utc(last.get("time")),
         "last_close": _round_num(last["close"], 6),
         "change_1_bar_pct": _round_num(_timeframe_change(clean, 1), 2),
         "change_6_bar_pct": _round_num(_timeframe_change(clean, 6), 2),
@@ -1716,7 +1775,7 @@ def _build_session_working_memory(history: list[dict], current_message: str, con
 
 
 def _build_system_prompt(language: str, context: dict, intent: str, has_image: bool, json_response: bool = True) -> str:
-    lang_name = "Chinese" if (language or "").lower().startswith("zh") else "English"
+    lang_name = _agent_response_language_name(language)
     context_bits = []
     if context.get("symbol"):
         context_bits.append(f"symbol={context.get('symbol')}")
@@ -1731,7 +1790,7 @@ def _build_system_prompt(language: str, context: dict, intent: str, has_image: b
         f"Reply in {lang_name}. Current intent={intent}; context: {context_line}. {image_line}\n"
         "Be practical and careful. Do not promise profit or invent unavailable live data. "
         "If the user asks to write strategy code, stay inside QuantDinger native workflows. "
-        "Use Indicator IDE code for indicator strategies and Python ScriptStrategy for script strategies or template-style requests. "
+        "Use Indicator IDE code for chart-only indicators and Strategy API V2 Python for executable or template-style strategies. "
         "Never output Pine Script, TradingView-only code, broker-specific scripts, or unrelated platform syntax unless the user explicitly asks for that platform. "
         "For strategy work, first clarify missing requirements, then propose design, then generate runnable code only when the user confirms or asks to generate. "
         "If the user asks for market/chart diagnosis, separate observable facts from inference. "
@@ -1806,7 +1865,7 @@ def _build_system_prompt(language: str, context: dict, intent: str, has_image: b
         "Return JSON only with this schema: "
         "{\"answer\":\"markdown answer\", \"summary\":\"short title\", \"confidence\":0-100, "
         "\"actions\":[{\"type\":\"analysis|strategy|debug|risk|todo|create_monitor_task\", \"label\":\"...\", \"payload\":{}}], "
-        "\"artifact\":{\"type\":\"none|strategy_code|checklist|market_note\", \"title\":\"...\", \"content\":\"...\"}}."
+        "\"artifact\":{\"type\":\"none|strategy_source|checklist|market_note\", \"title\":\"...\", \"content\":\"...\"}}."
     )
 
 
@@ -1881,9 +1940,7 @@ def _build_preflight(user_id: int) -> dict:
     billing = get_billing_service()
     llm = LLMService()
     provider = llm.provider.value
-    api_key = llm.get_api_key(llm.provider)
-    custom_base_ok = provider == "custom" and bool(llm.get_base_url(llm.provider))
-    llm_ready = bool(api_key) or custom_base_ok or provider == "litellm"
+    llm_ready = llm.is_configured()
     billing_enabled = bool(billing.is_billing_enabled())
     credits = float(billing.get_user_credits(user_id))
     result = {

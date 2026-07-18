@@ -8,11 +8,13 @@ from flask import g, jsonify, request
 
 from app.routes.strategy_blueprint import strategy_blp
 from app.routes.strategy_services import get_strategy_service
+from app.services.script_source import get_script_source_service
 from app.services.strategy_runtime.executors import (
     build_executor_strategy_payload,
     executor_templates,
     preview_executor,
 )
+from app.services.strategy_v2.deployment import get_strategy_v2_deployment_service
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
 
@@ -47,22 +49,24 @@ def preview_executor_strategy():
 def generate_executor_strategy():
     try:
         payload = request.get_json() or {}
-        user_id = int(getattr(g, "user_id", None) or payload.get("user_id") or 1)
+        user_id = int(g.user_id)
         strategy_payload = build_executor_strategy_payload(payload, user_id=user_id)
         return jsonify({
             "code": 1,
             "msg": "success",
             "data": {
                 "strategy_name": strategy_payload["strategy_name"],
-                "strategy_code": strategy_payload["strategy_code"],
+                "strategy_type": strategy_payload["strategy_type"],
+                "template_key": strategy_payload["template_key"],
+                "code": strategy_payload["code"],
                 "market_category": strategy_payload["market_category"],
                 "symbol": strategy_payload["symbol"],
                 "timeframe": strategy_payload["timeframe"],
                 "market_type": strategy_payload["market_type"],
                 "trade_direction": strategy_payload["trade_direction"],
-                "leverage": strategy_payload["leverage"],
-                "initial_capital": strategy_payload["initial_capital"],
                 "trading_config": strategy_payload["trading_config"],
+                "metadata": strategy_payload["metadata"],
+                "compatibility": strategy_payload["compatibility"],
             },
         })
     except Exception as exc:
@@ -76,11 +80,41 @@ def generate_executor_strategy():
 def create_executor_strategy():
     try:
         payload = request.get_json() or {}
-        user_id = int(getattr(g, "user_id", None) or payload.get("user_id") or 1)
+        user_id = int(g.user_id)
         strategy_payload = build_executor_strategy_payload(payload, user_id=user_id)
-        strategy_id = get_strategy_service().create_strategy(strategy_payload)
+        source_id = get_script_source_service().create_source({
+            "user_id": user_id,
+            "name": strategy_payload["strategy_name"],
+            "description": strategy_payload["description"],
+            "code": strategy_payload["code"],
+            "asset_type": strategy_payload["asset_type"],
+            "template_key": strategy_payload["template_key"],
+            "metadata": strategy_payload["metadata"],
+            "status": "ready",
+        })
+        exchange_config = strategy_payload.get("exchange_config") or {}
+        notification_config = strategy_payload.get("notification_config") or {}
+        strategy_id = get_strategy_v2_deployment_service().save(
+            user_id=user_id,
+            payload={
+                "sourceId": source_id,
+                "name": strategy_payload["strategy_name"],
+                "initialCapital": strategy_payload["initial_capital"],
+                "executionMode": strategy_payload["execution_mode"],
+                "credentialId": exchange_config.get("credential_id"),
+                "leverageEnabled": strategy_payload["leverage_enabled"],
+                "leverage": strategy_payload["leverage"],
+                "positionSide": strategy_payload["trade_direction"],
+                "notificationChannels": notification_config.get("channels") or [],
+                "notificationTargets": notification_config.get("targets") or {},
+            },
+        )
         strategy = get_strategy_service().get_strategy(strategy_id, user_id=user_id) or {"id": strategy_id}
-        return jsonify({"code": 1, "msg": "success", "data": {"id": strategy_id, "strategy": strategy}})
+        return jsonify({
+            "code": 1,
+            "msg": "success",
+            "data": {"id": strategy_id, "source_id": source_id, "strategy": strategy},
+        })
     except Exception as exc:
         logger.error("create_executor_strategy failed: %s", exc)
         logger.error(traceback.format_exc())

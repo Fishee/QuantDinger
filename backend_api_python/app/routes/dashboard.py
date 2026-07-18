@@ -98,23 +98,14 @@ def _as_list(value: Any) -> List[str]:
 
 
 def _is_bot_strategy(row: Dict[str, Any]) -> bool:
-    try:
-        mode = str((row or {}).get("strategy_mode") or "").strip().lower()
-        return mode == "bot"
-    except Exception:
-        return False
+    config = _safe_json_loads((row or {}).get("trading_config"), {})
+    return str(config.get("strategy_family") or "").strip().lower() == "robot"
 
 
 def _strategy_bucket(row: Dict[str, Any]) -> str:
-    """Classify a strategy row into script or bot."""
+    """Classify a strategy row for dashboard presentation."""
     if _is_bot_strategy(row):
         return "bot"
-    mode = str((row or {}).get("strategy_mode") or "").strip().lower()
-    if mode == "script":
-        return "script"
-    st = str((row or {}).get("strategy_type") or "").strip()
-    if st == "ScriptStrategy":
-        return "script"
     return "script"
 
 
@@ -355,7 +346,7 @@ def summary():
             cur = db.cursor()
             cur.execute(
                 """
-                SELECT id, strategy_name, strategy_type, status, initial_capital, trading_config, strategy_mode
+                SELECT id, strategy_name, strategy_type, status, initial_capital, trading_config
                 FROM qd_strategies_trading
                 WHERE user_id = ?
                 """,
@@ -437,7 +428,7 @@ def summary():
             total_trades_all = int((cur.fetchone() or {}).get("cnt") or 0)
             cur.execute(
                 """
-                SELECT COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission, 0)), 0) AS total
+                SELECT COALESCE(SUM(COALESCE(t.profit, 0) - COALESCE(t.commission_quote, 0)), 0) AS total
                 FROM qd_strategy_trades t
                 INNER JOIN qd_strategies_trading s ON s.id = t.strategy_id
                 WHERE t.user_id = ?

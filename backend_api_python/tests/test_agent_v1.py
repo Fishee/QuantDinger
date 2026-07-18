@@ -86,7 +86,7 @@ def test_expired_token_rejected(client, monkeypatch):
     agent_auth._schema_ready = True
     monkeypatch.setattr(
         agent_auth, "_lookup_token",
-        lambda raw: _fake_token_row(expires_at=datetime.utcnow() - timedelta(days=1)),
+        lambda raw: _fake_token_row(expires_at=datetime.now() - timedelta(days=1)),
     )
     resp = client.get("/api/agent/v1/whoami", headers=_bearer())
     assert resp.status_code == 401

@@ -64,12 +64,12 @@ _SUPERTREND_CODE = r'''# =======================================================
 my_indicator_name = "[Sample] SuperTrend Trend-Following"
 my_indicator_description = (
     "Classic SuperTrend: ATR-channel direction flip with chart-only bullish "
-    "and bearish markers. Convert it to a ScriptStrategy before backtesting "
+    "and bearish markers. Convert it to a Strategy API source before backtesting "
     "or live trading."
 )
 
 # Unit: 0–1 ratio (0.04 = 4% underlying price move; 0.001 = 0.1%; entryPct 1 = 100% capital)
-# ===== Tunable params (auto-detected by the structured tuner via range=...) =====
+# ===== Configurable params (auto-detected from range metadata) =====
 # @param atr_period int 10 ATR Wilder smoothing period range=7:21:1
 # @param multiplier float 3.0 ATR band multiplier range=1.5:5.0:0.5
 

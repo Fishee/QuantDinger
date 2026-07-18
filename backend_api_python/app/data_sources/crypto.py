@@ -4,6 +4,7 @@
 """
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta, timezone
+import os
 import threading
 import time
 import ccxt
@@ -18,6 +19,14 @@ logger = get_logger(__name__)
 _SCOPED_INSTANCES: Dict[str, "CryptoDataSource"] = {}
 _INVALID_SYMBOL_UNTIL: Dict[str, float] = {}
 PUBLIC_KLINE_EXCHANGE_IDS = ("binance", "bitget", "bybit", "okx", "gate", "htx")
+
+
+def apply_public_ccxt_endpoint_config(config: Dict[str, Any], exchange_id: str) -> Dict[str, Any]:
+    """Apply current public REST endpoints without mutating the caller config."""
+    resolved = dict(config or {})
+    if (exchange_id or "").strip().lower() == "okx":
+        resolved["hostname"] = (os.getenv("OKX_API_HOST") or "openapi.okx.com").strip()
+    return resolved
 
 
 def _invalid_symbol_ttl_sec() -> float:
@@ -183,6 +192,7 @@ class CryptoDataSource(BaseDataSource):
             raise ValueError(f"Unsupported CCXT exchange: {exchange_id}")
 
         exchange_class = getattr(ccxt, exchange_id)
+        config = apply_public_ccxt_endpoint_config(config, exchange_id)
         self.exchange = exchange_class(config)
         self._markets_loaded = False
         self._markets_cache = None

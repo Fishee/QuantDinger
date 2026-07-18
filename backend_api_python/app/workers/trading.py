@@ -10,6 +10,7 @@ import uuid
 
 from app.services.strategy_command_repository import StrategyCommand, StrategyCommandRepository
 from app.utils.logger import get_logger
+from app.utils.strategy_runtime_logs import append_strategy_log
 
 
 logger = get_logger(__name__)
@@ -94,7 +95,10 @@ class TradingWorker:
             if command.command_type == "start":
                 result = self._start(command.strategy_id)
             elif command.command_type == "stop":
-                result = self._stop_strategy(command.strategy_id)
+                result = self._stop_strategy(
+                    command.strategy_id,
+                    close_positions=bool(command.payload.get("close_positions")),
+                )
             elif command.command_type == "restart":
                 self._stop_strategy(command.strategy_id)
                 result = self._start(command.strategy_id)
@@ -102,6 +106,7 @@ class TradingWorker:
                 result = self._reconcile(command.strategy_id)
             self.repository.complete(command.id, result=result)
         except Exception as exc:
+            append_strategy_log(command.strategy_id, "error", str(exc))
             logger.error(
                 "Strategy command failed: command=%s strategy=%s type=%s",
                 command.id,
@@ -140,7 +145,17 @@ class TradingWorker:
             raise RuntimeError(hint or "Strategy exited during startup.")
         return {"strategy_id": strategy_id, "runtime_owner": self.worker_id, "status": "running"}
 
-    def _stop_strategy(self, strategy_id: int) -> dict:
+    def _stop_strategy(self, strategy_id: int, *, close_positions: bool = False) -> dict:
+        if close_positions:
+            result = self.executor.stop_strategy_with_policy(
+                strategy_id,
+                close_positions=True,
+            )
+            self.repository.release_strategy_lease(
+                strategy_id=strategy_id,
+                owner_id=self.worker_id,
+            )
+            return result
         if not self.executor.stop_strategy(strategy_id, persist_status=False):
             raise RuntimeError("Executor failed to stop the local strategy runtime.")
         self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)

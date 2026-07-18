@@ -221,12 +221,6 @@ def _start_trading_support_services() -> None:
 def _start_scheduler_services(*, include_celery_managed: bool = False) -> None:
     """Start long-lived schedulers that are not Celery tasks."""
     start_portfolio_monitor()
-    try:
-        from app.services.portfolio_deployment import start_portfolio_deployment_scheduler
-
-        start_portfolio_deployment_scheduler()
-    except Exception:
-        logger.error("Failed to start portfolio deployment scheduler", exc_info=True)
     start_usdt_order_worker()
     try:
         from app.services.indicator_signal_alerts import start_indicator_signal_alert_worker
@@ -234,6 +228,13 @@ def _start_scheduler_services(*, include_celery_managed: bool = False) -> None:
         start_indicator_signal_alert_worker()
     except Exception:
         logger.error("Failed to start indicator signal alert worker", exc_info=True)
+
+    try:
+        from app.services.market_catalog_sync import start_market_catalog_sync_on_boot
+
+        start_market_catalog_sync_on_boot()
+    except Exception:
+        logger.error("Failed to start initial market catalog sync", exc_info=True)
 
     if not include_celery_managed:
         return
@@ -249,9 +250,3 @@ def _start_scheduler_services(*, include_celery_managed: bool = False) -> None:
         start_reflection_worker()
     except Exception:
         logger.error("Failed to start reflection worker", exc_info=True)
-    try:
-        from app.services.market_catalog_sync import start_market_catalog_sync_on_boot
-
-        start_market_catalog_sync_on_boot()
-    except Exception:
-        logger.error("Failed to start automatic market catalog sync", exc_info=True)

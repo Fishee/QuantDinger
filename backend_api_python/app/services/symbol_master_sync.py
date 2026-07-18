@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
 
 import requests
+import urllib3
 
 from app.data_sources.tencent import normalize_hk_code
 from app.services.symbol_name import normalize_crypto_symbol
@@ -263,7 +266,11 @@ def fetch_crypto_symbols_with_diagnostics():
     """Fetch active USDT instruments and return per-context diagnostics."""
     import ccxt  # type: ignore
     from app.config.data_sources import CCXTConfig
-    from app.data_sources.crypto import PUBLIC_KLINE_EXCHANGE_IDS, resolve_ccxt_for_live_trading
+    from app.data_sources.crypto import (
+        PUBLIC_KLINE_EXCHANGE_IDS,
+        apply_public_ccxt_endpoint_config,
+        resolve_ccxt_for_live_trading,
+    )
     from app.services.market.symbol_search import _classify_asset
 
     rows: List[SymbolMasterRow] = []
@@ -273,11 +280,15 @@ def fetch_crypto_symbols_with_diagnostics():
             context_rows: List[SymbolMasterRow] = []
             try:
                 ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
-                config = {"enableRateLimit": True, "timeout": CCXTConfig.TIMEOUT}
+                config = {
+                    "enableRateLimit": True,
+                    "timeout": max(int(CCXTConfig.TIMEOUT or 0), 30000),
+                }
                 if options:
                     config["options"] = options
+                config = apply_public_ccxt_endpoint_config(config, exchange_id)
                 exchange = getattr(ccxt, ccxt_id)(config)
-                exchange.load_markets()
+                _load_ccxt_markets_with_retry(exchange)
                 for symbol, info in exchange.markets.items():
                     is_target = bool(info.get("spot")) if market_type == "spot" else bool(info.get("swap"))
                     quote = _clean_symbol(info.get("quote"))
@@ -301,8 +312,25 @@ def fetch_crypto_symbols_with_diagnostics():
                     "market_type": market_type,
                     "ok": True,
                     "rows": len(context_rows),
+                    "source": "ccxt",
                 })
             except Exception as e:
+                if exchange_id == "okx":
+                    try:
+                        context_rows = _fetch_okx_public_symbol_rows(market_type, _classify_asset)
+                        rows.extend(context_rows)
+                        contexts.append({
+                            "exchange": exchange_id,
+                            "market_type": market_type,
+                            "ok": True,
+                            "rows": len(context_rows),
+                            "source": "official_public_api",
+                            "fallback": True,
+                            "primary_error": str(e)[:500],
+                        })
+                        continue
+                    except Exception as fallback_error:
+                        e = RuntimeError(f"{e}; official fallback failed: {fallback_error}")
                 logger.warning("crypto catalog unavailable exchange=%s type=%s: %s", exchange_id, market_type, e)
                 contexts.append({
                     "exchange": exchange_id,
@@ -312,6 +340,129 @@ def fetch_crypto_symbols_with_diagnostics():
                     "error": str(e),
                 })
     return _unique_rows(rows), contexts
+
+
+def _load_ccxt_markets_with_retry(exchange, attempts: int = 2) -> None:
+    last_error = None
+    for attempt in range(max(1, int(attempts or 1))):
+        try:
+            exchange.load_markets(reload=attempt > 0)
+            return
+        except TypeError:
+            exchange.load_markets()
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _fetch_okx_public_symbol_rows(market_type: str, classify_asset) -> List[SymbolMasterRow]:
+    inst_type = "SPOT" if market_type == "spot" else "SWAP"
+    path = f"/api/v5/public/instruments?instType={inst_type}"
+    payload = _get_okx_public_json(path)
+    if str(payload.get("code") or "") != "0":
+        raise RuntimeError(f"OKX public instruments returned code={payload.get('code')}")
+    return _okx_public_payload_to_rows(payload, market_type, classify_asset)
+
+
+def _get_okx_public_json(path: str) -> dict:
+    hostname = "openapi.okx.com"
+    url = f"https://{hostname}{path}"
+    try:
+        response = requests.get(url, timeout=30, headers={"User-Agent": "QuantDinger/1.0"})
+        response.raise_for_status()
+        return response.json()
+    except Exception as primary_error:
+        errors = []
+        for address in _resolve_ipv4_with_doh(hostname):
+            pool = urllib3.HTTPSConnectionPool(
+                address,
+                port=443,
+                server_hostname=hostname,
+                assert_hostname=hostname,
+                timeout=urllib3.Timeout(connect=10, read=30),
+                retries=False,
+            )
+            try:
+                response = pool.request(
+                    "GET",
+                    path,
+                    headers={"Host": hostname, "User-Agent": "QuantDinger/1.0"},
+                )
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}")
+                payload = json.loads(response.data.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise RuntimeError("invalid JSON payload")
+                return payload
+            except Exception as exc:
+                errors.append(f"{address}: {exc}")
+            finally:
+                pool.close()
+        detail = "; ".join(errors) or "DoH returned no IPv4 addresses"
+        raise RuntimeError(f"{primary_error}; {detail}") from primary_error
+
+
+def _resolve_ipv4_with_doh(hostname: str) -> List[str]:
+    providers = (
+        ("https://cloudflare-dns.com/dns-query", {"name": hostname, "type": "A"}),
+        ("https://dns.google/resolve", {"name": hostname, "type": "A"}),
+    )
+    addresses: List[str] = []
+    for url, params in providers:
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=10,
+                headers={"Accept": "application/dns-json", "User-Agent": "QuantDinger/1.0"},
+            )
+            response.raise_for_status()
+            for answer in response.json().get("Answer") or []:
+                value = str(answer.get("data") or "").strip()
+                if int(answer.get("type") or 0) == 1 and re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value):
+                    addresses.append(value)
+            if addresses:
+                break
+        except Exception as exc:
+            logger.debug("DoH lookup failed provider=%s host=%s: %s", url, hostname, exc)
+    return list(dict.fromkeys(addresses))
+
+
+def _okx_public_payload_to_rows(payload: dict, market_type: str, classify_asset) -> List[SymbolMasterRow]:
+    rows: List[SymbolMasterRow] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict) or str(item.get("state") or "").lower() != "live":
+            continue
+        instrument_id = _clean_text(item.get("instId"))
+        if market_type == "spot":
+            base = _clean_symbol(item.get("baseCcy"))
+            quote = _clean_symbol(item.get("quoteCcy"))
+            if quote != "USDT":
+                continue
+        else:
+            settle = _clean_symbol(item.get("settleCcy"))
+            if settle != "USDT" or not instrument_id.endswith("-USDT-SWAP"):
+                continue
+            base = _clean_symbol(item.get("ctValCcy")) or instrument_id.removesuffix("-USDT-SWAP")
+            quote = "USDT"
+        if not base or not instrument_id:
+            continue
+        rows.append(SymbolMasterRow(
+            "Crypto",
+            f"{base}/{quote}",
+            base,
+            "okx",
+            quote,
+            market_type,
+            instrument_id,
+            quote,
+            classify_asset({"info": item}),
+        ))
+    return _unique_rows(rows)
 
 
 def fetch_crypto_symbols() -> List[SymbolMasterRow]:

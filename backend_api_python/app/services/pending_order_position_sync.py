@@ -476,9 +476,7 @@ class PendingOrderPositionSyncMixin:
 
                     elif IBKRClient is not None and isinstance(client, IBKRClient):
                         # IBKR US-stock positions. `quantity` is signed: >0 = long, <0 = short.
-                        # We currently only enforce long-only entries (see _execute_ibkr_order),
-                        # but still mirror short rows so reconciliation does not orphan them
-                        # if the user had pre-existing inventory in TWS.
+                        # Mirror both sides because IBKR stock positions are signed.
                         try:
                             positions = client.get_positions() or []
                         except Exception as e:

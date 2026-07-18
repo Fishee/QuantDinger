@@ -56,7 +56,7 @@ def test_authoring_contract_ok(client, monkeypatch):
     assert "minimal_indicator_snippet" in data
     assert "minimal_backtest_snippet" not in data
     assert any("open_long" in item for item in data["forbidden"])
-    assert "ScriptStrategy" in " ".join(data["workflow"])
+    assert "Indicator-to-Strategy" in " ".join(data["workflow"])
 
 
 def test_save_indicator_requires_w_scope(client, monkeypatch):

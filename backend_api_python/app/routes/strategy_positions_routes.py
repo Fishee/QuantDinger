@@ -45,6 +45,7 @@ def get_positions():
         if leverage <= 0:
             leverage = 1.0
         market_type = str(trading_config.get("market_type") or st.get("market_type") or "swap").strip().lower()
+        price_market_category = str(st.get("market_category") or "Crypto").strip() or "Crypto"
         if is_derivatives_market(market_type):
             market_type = "swap"
         try:
@@ -133,7 +134,7 @@ def get_positions():
                 return sym_to_price[sym]
             try:
                 t = DataSourceFactory.get_ticker(
-                    "Crypto",
+                    price_market_category,
                     sym,
                     exchange_id=price_exchange_id,
                     market_type=price_market_type,
@@ -233,6 +234,7 @@ def get_positions():
                 from app.services.exchange_execution import resolve_exchange_config
                 from app.services.live_trading.account_positions import (
                     list_account_positions,
+                    list_strategy_allocations_for_account,
                     reconcile_strategy_vs_account,
                 )
                 from app.services.live_trading.leg_context import credential_id_from_exchange_config
@@ -253,7 +255,17 @@ def get_positions():
                         r for r in account_rows
                         if normalize_strategy_symbol(str(r.get("symbol") or "")).upper() in allowed_upper
                     ]
-                account_reconciliation = reconcile_strategy_vs_account(out, account_rows)
+                allocated_rows = list_strategy_allocations_for_account(
+                    user_id=int(user_id),
+                    credential_id=cred_id,
+                    market_type=market_type,
+                    allowed_symbols=allowed,
+                )
+                account_reconciliation = reconcile_strategy_vs_account(
+                    out,
+                    account_rows,
+                    allocated_rows=allocated_rows,
+                )
                 account_reconciliation["account_positions"] = account_rows
             except Exception as e:
                 account_reconciliation = {
@@ -290,6 +302,27 @@ def get_positions():
         }
 
         exchange_snapshot = None
+        account_risk = None
+        if execution_mode == "live":
+            try:
+                from app.services.exchange_execution import resolve_exchange_config
+                from app.services.live_trading.account_risk import (
+                    account_risk_limits,
+                    account_risk_snapshot,
+                )
+                from app.services.live_trading.leg_context import credential_id_from_exchange_config
+
+                resolved_ex = resolve_exchange_config(exchange_config, user_id=int(user_id or 1))
+                cred_id = int(credential_id_from_exchange_config(resolved_ex) or 0)
+                account_risk = account_risk_snapshot(
+                    user_id=int(user_id),
+                    credential_id=cred_id,
+                    market_type=market_type,
+                    strategy_id=int(strategy_id),
+                    limits=account_risk_limits({"trading_config": trading_config}),
+                )
+            except Exception as e:
+                account_risk = {"allowed": False, "violations": [f"accountRisk.snapshotFailed:{e}"]}
         bot_type = str(st.get("bot_type") or trading_config.get("bot_type") or "").strip().lower()
         if execution_mode == "live" and bot_type == "grid":
             try:
@@ -320,6 +353,7 @@ def get_positions():
                 'position_meta': position_meta,
                 'exchange_snapshot': exchange_snapshot,
                 'account_reconciliation': account_reconciliation,
+                'account_risk': account_risk,
             },
         })
     except Exception as e:

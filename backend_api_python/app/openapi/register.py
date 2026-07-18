@@ -38,7 +38,6 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/fast-analysis", "FastAnalysis"),
     ("/api/billing", "Billing"),
     ("/api/quick-trade", "QuickTrade"),
-    ("/api/experiment", "Experiment"),
 ]
 
 
@@ -63,7 +62,6 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.backtest_center import backtest_center_blp
     from app.routes.market import market_blp
     from app.routes.universe import universe_blp
-    from app.routes.portfolio_deployment import portfolio_deployment_blp
     from app.routes.factors import factors_blp
     from app.routes.market_modules import market_modules_blp
     from app.routes.ai_chat import ai_chat_blp
@@ -81,7 +79,6 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.fast_analysis import fast_analysis_blp
     from app.routes.billing import billing_blp
     from app.routes.quick_trade import quick_trade_blp
-    from app.routes.experiment import experiment_blp
 
     registrations: list[tuple] = [
         (health_blp, ""),
@@ -92,7 +89,6 @@ def register_human_blueprints(api: Api) -> None:
         (backtest_center_blp, "/api/backtest"),
         (market_blp, "/api/market"),
         (universe_blp, "/api/universes"),
-        (portfolio_deployment_blp, "/api/portfolio-deployments"),
         (factors_blp, "/api/factors"),
         (market_modules_blp, "/api/market-modules"),
         (ai_chat_blp, "/api/ai"),
@@ -110,7 +106,6 @@ def register_human_blueprints(api: Api) -> None:
         (fast_analysis_blp, "/api/fast-analysis"),
         (billing_blp, "/api/billing"),
         (quick_trade_blp, "/api/quick-trade"),
-        (experiment_blp, "/api/experiment"),
     ]
 
     for blp, prefix in registrations:
@@ -126,8 +121,6 @@ def register_human_blueprints(api: Api) -> None:
 
 _SSE_PATHS = frozenset({
     "/api/indicator/aiGenerate",
-    "/api/strategies/ai-generate",
-    "/api/experiment/ai-optimize",
 })
 
 

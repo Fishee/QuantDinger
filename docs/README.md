@@ -44,9 +44,8 @@ Notification configuration:
 | --- | --- |
 | [Indicator guide](trading/INDICATOR_DEV_GUIDE.md) | Chart-only Python indicator contract. |
 | [指标指南](trading/INDICATOR_DEV_GUIDE_CN.md) | 图表指标开发契约。 |
-| [Strategy guide](trading/STRATEGY_DEV_GUIDE.md) | `ScriptStrategy`, risk, backtest, and live execution. |
+| [Strategy guide](trading/STRATEGY_DEV_GUIDE.md) | Strategy API V2, risk, backtest, and live execution. |
 | [策略指南](trading/STRATEGY_DEV_GUIDE_CN.md) | 脚本策略、风控、回测与实盘。 |
-| [Unified backtest contract](trading/UNIFIED_BACKTEST_ENGINE_CN.md) | 当前统一回测链路与策略边界。 |
 | [Public universes and fundamentals](trading/PUBLIC_UNIVERSE_AND_FUNDAMENTALS_CN.md) | 股票池来源、时点数据和已知限制。 |
 | [IBKR guide](trading/IBKR_TRADING_GUIDE_EN.md) | IBKR connectivity and trading workflow. |
 

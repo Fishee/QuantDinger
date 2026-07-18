@@ -1,3 +1,4 @@
+from app.services import user_service
 from app.services.market import symbol_search, watchlist
 
 
@@ -163,6 +164,7 @@ def test_crypto_add_persists_asset_without_exchange_binding(monkeypatch):
     assert "DELETE FROM qd_watchlist" in delete_sql
     assert delete_params == (1, "Crypto", "BTC/USDT")
     assert "INSERT INTO qd_watchlist" in insert_sql
+    assert "ON CONFLICT(user_id, market, symbol) DO UPDATE SET" in " ".join(insert_sql.split())
     assert insert_params == (
         1,
         "Crypto",
@@ -173,3 +175,20 @@ def test_crypto_add_persists_asset_without_exchange_binding(monkeypatch):
         "",
         "USDT",
     )
+
+
+def test_default_watchlist_seed_uses_asset_unique_key(monkeypatch):
+    conn = _CaptureConn()
+    monkeypatch.setattr(
+        user_service,
+        "_DEFAULT_WATCHLIST",
+        [("Crypto", "BTC/USDT", "Bitcoin")],
+    )
+
+    user_service._seed_default_watchlist(conn, 9)
+
+    assert conn.committed is True
+    assert len(conn.cursor_obj.executed) == 1
+    insert_sql, insert_params = conn.cursor_obj.executed[0]
+    assert "ON CONFLICT (user_id, market, symbol) DO NOTHING" in " ".join(insert_sql.split())
+    assert insert_params == (9, "Crypto", "BTC/USDT", "Bitcoin", "", "spot")

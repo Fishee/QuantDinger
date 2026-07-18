@@ -22,6 +22,7 @@ import pandas as pd
 
 from app.services.kline import KlineService
 from app.services.signal_notifier import SignalNotifier
+from app.services.user_preferences import get_notification_settings
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.notification_display import with_display
@@ -80,18 +81,65 @@ def _normalize_key(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _is_present(value: Any) -> bool:
+_FALSE_SIGNAL_STRINGS = {"", "0", "false", "none", "null", "nan", "na", "n/a"}
+
+
+def _signal_marker_is_active(value: Any) -> bool:
     if value is None:
         return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, dict):
+        for key in ("active", "signal", "triggered", "hit", "visible"):
+            if key in value and value.get(key) is not None:
+                return _signal_marker_is_active(value.get(key))
+        for key in ("price", "value", "y", "data"):
+            if key in value and _signal_marker_is_active(value.get(key)):
+                return True
+        return False
     try:
-        if isinstance(value, float) and math.isnan(value):
-            return False
         if pd.isna(value):
             return False
     except Exception:
-        pass
-    text = str(value).strip().lower()
-    return text not in ("", "none", "nan", "null")
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSE_SIGNAL_STRINGS
+    try:
+        number = float(value)
+        return math.isfinite(number) and number != 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _signal_marker_price(value: Any, fallback: float) -> float:
+    if isinstance(value, dict):
+        for key in ("price", "value", "y", "data"):
+            if key in value:
+                return _safe_float(value.get(key), fallback)
+        return fallback
+    if isinstance(value, (bool, np.bool_)):
+        return fallback
+    return _safe_float(value, fallback)
+
+
+def _signal_render_mode(signal: Dict[str, Any], data: List[Any]) -> str:
+    raw_mode = str(signal.get("renderMode") or signal.get("mode") or "").strip().lower()
+    if raw_mode in ("point", "points", "marker", "markers", "raw"):
+        return "points"
+    if raw_mode in ("state", "continuous", "condition"):
+        return "edge"
+    if not data:
+        return "events"
+    active_count = sum(1 for value in data if _signal_marker_is_active(value))
+    return "edge" if active_count / len(data) > 0.18 else "events"
+
+
+def _signal_marker_should_notify(signal: Dict[str, Any], data: List[Any], idx: int) -> bool:
+    if idx < 0 or idx >= len(data) or not _signal_marker_is_active(data[idx]):
+        return False
+    if _signal_render_mode(signal, data) != "edge":
+        return True
+    return idx == 0 or not _signal_marker_is_active(data[idx - 1])
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -380,6 +428,7 @@ class IndicatorSignalAlertService:
             return {"triggered": False, "reason": "error", "error": str(exc)}
 
     def _sanitize_payload(self, user_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        profile_settings = get_notification_settings(int(user_id)) or {}
         indicator_id = int(payload.get("indicator_id") or payload.get("indicatorId") or 0)
         if indicator_id <= 0:
             raise ValueError("Missing indicator_id")
@@ -392,17 +441,41 @@ class IndicatorSignalAlertService:
         if not isinstance(signal_keys, list):
             signal_keys = ["any"]
         signal_keys = [str(k).strip() for k in signal_keys if str(k).strip()] or ["any"]
-        channels = payload.get("channels") or ["browser"]
+        channels = payload.get("channels") or profile_settings.get("default_channels") or ["browser"]
         if not isinstance(channels, list):
             channels = ["browser"]
         channels = [_normalize_channel(c) for c in channels]
         channels = [c for c in dict.fromkeys(channels) if c in ("browser", "email", "telegram", "webhook")]
         if not channels:
             channels = ["browser"]
-        targets = payload.get("targets") if isinstance(payload.get("targets"), dict) else {}
-        for key in ("email", "telegram_chat_id", "telegram_bot_token", "webhook_url"):
+        targets = dict(payload.get("targets")) if isinstance(payload.get("targets"), dict) else {}
+        for key in (
+            "email",
+            "telegram_chat_id",
+            "telegram_bot_token",
+            "webhook_url",
+            "webhook_token",
+            "webhook_signing_secret",
+        ):
             if key in payload and key not in targets:
                 targets[key] = payload.get(key)
+        for key in (
+            "email",
+            "telegram_chat_id",
+            "telegram_bot_token",
+            "webhook_url",
+            "webhook_token",
+            "webhook_signing_secret",
+        ):
+            if not str(targets.get(key) or "").strip():
+                targets[key] = str(profile_settings.get(key) or "").strip()
+
+        if "email" in channels and not str(targets.get("email") or "").strip():
+            raise ValueError("Missing email notification target")
+        if "telegram" in channels and not str(targets.get("telegram_chat_id") or "").strip():
+            raise ValueError("Missing Telegram Chat ID")
+        if "webhook" in channels and not str(targets.get("webhook_url") or "").strip():
+            raise ValueError("Missing Webhook URL")
         params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
         return {
             "user_id": int(user_id),
@@ -553,9 +626,9 @@ class IndicatorSignalAlertService:
             text_data = sig.get("textData") if isinstance(sig.get("textData"), list) else []
             marker = data[idx] if idx < len(data) else None
             point_text = text_data[idx] if idx < len(text_data) else None
-            # Static signal.text is the label template for a signal series. It
-            # must not be treated as evidence that every bar has a signal.
-            if not _is_present(marker) and not _is_present(point_text):
+            # Match chart rendering semantics: labels never create a signal,
+            # and dense state arrays notify only when they become active.
+            if not _signal_marker_should_notify(sig, data, idx):
                 continue
             signal_type = str(sig.get("type") or "signal").strip() or "signal"
             label = str(point_text or sig.get("text") or signal_type).strip()
@@ -564,7 +637,7 @@ class IndicatorSignalAlertService:
             return {
                 "type": signal_type,
                 "label": label,
-                "price": _safe_float(marker, _safe_float(bar.get("close"))),
+                "price": _signal_marker_price(marker, _safe_float(bar.get("close"))),
                 "bar_time": bar_time,
                 "bar_index": idx,
                 "notify_bar_time": notify_bar_time,

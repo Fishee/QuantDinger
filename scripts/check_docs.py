@@ -155,7 +155,7 @@ def validate() -> list[str]:
             if not resolved.exists():
                 errors.append(f"{relative_source}: missing local target {raw_target}")
                 continue
-            if is_asset:
+            if is_asset or (DOCS / "screenshots").resolve() in resolved.parents:
                 referenced_assets.add(resolved)
 
     screenshots = DOCS / "screenshots"

@@ -9,6 +9,28 @@ from typing import Any, Dict, List
 EXECUTOR_TYPES = ("grid", "dca", "martingale", "layered_martingale")
 
 
+def executor_engine_compatibility() -> Dict[str, Any]:
+    return {
+        "strategy": {
+            "supported": True,
+            "api_version": 2,
+            "editable_source": True,
+        },
+        "backtest": {
+            "supported": True,
+            "engine": "quantdinger-strategy-api-v2",
+        },
+        "live": {
+            "supported": True,
+            "engine": "quantdinger-strategy-api-v2",
+            "credential_required": True,
+        },
+        "markets": ["Crypto"],
+        "market_types": ["spot", "swap"],
+        "sides": ["long", "short"],
+    }
+
+
 def _float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -185,6 +207,7 @@ def preview_executor(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def executor_templates() -> Dict[str, Any]:
     return {
+        "compatibility": executor_engine_compatibility(),
         "items": [
             {
                 "executor_type": "grid",
@@ -192,12 +215,13 @@ def executor_templates() -> Dict[str, Any]:
                     "side": "long",
                     "market_type": "swap",
                     "timeframe": "1m",
-                    "start_price": 98000,
-                    "end_price": 102000,
-                    "limit_price": 97000,
+                    "dynamic_anchor": True,
+                    "start_price": 0.98,
+                    "end_price": 1.02,
+                    "limit_price": 0.97,
                     "grid_count": 8,
-                    "total_amount_quote": 800,
-                    "initial_position_pct": 0.2,
+                    "total_amount_quote": 8,
+                    "initial_position_pct": 0.6,
                     "take_profit_pct": 0.004,
                     "max_open_orders": 4,
                     "grid_mode": "arithmetic",
@@ -210,9 +234,10 @@ def executor_templates() -> Dict[str, Any]:
                     "side": "long",
                     "market_type": "swap",
                     "timeframe": "1m",
-                    "entry_price": 100000,
-                    "base_order_size": 100,
-                    "safety_order_size": 120,
+                    "dynamic_anchor": True,
+                    "entry_price": 1,
+                    "base_order_size": 1,
+                    "safety_order_size": 1.2,
                     "price_deviation_pct": 0.015,
                     "step_multiplier": 1.2,
                     "volume_multiplier": 1.15,
@@ -227,9 +252,10 @@ def executor_templates() -> Dict[str, Any]:
                     "side": "long",
                     "market_type": "swap",
                     "timeframe": "1m",
-                    "entry_price": 100000,
-                    "base_order_size": 80,
-                    "safety_order_size": 100,
+                    "dynamic_anchor": True,
+                    "entry_price": 1,
+                    "base_order_size": 0.8,
+                    "safety_order_size": 1,
                     "price_deviation_pct": 0.012,
                     "step_multiplier": 1.4,
                     "volume_multiplier": 1.6,
@@ -245,10 +271,11 @@ def executor_templates() -> Dict[str, Any]:
                     "side": "long",
                     "market_type": "swap",
                     "timeframe": "1m",
-                    "entry_price": 100000,
+                    "dynamic_anchor": True,
+                    "entry_price": 1,
                     "layer_count": 5,
                     "orders_per_layer": 3,
-                    "base_order_size": 100,
+                    "base_order_size": 1,
                     "volume_multiplier": 1.8,
                     "intra_spacing_1_pct": 0.005,
                     "intra_spacing_2_pct": 0.008,
@@ -266,6 +293,8 @@ def executor_templates() -> Dict[str, Any]:
 
 
 def build_executor_strategy_payload(payload: Dict[str, Any], *, user_id: int) -> Dict[str, Any]:
+    from app.services.strategy_v2 import compile_strategy_v2
+
     cfg = normalize_executor_payload(payload)
     exchange_config = cfg.get("exchange_config") or cfg.get("exchangeConfig") or {}
     if not isinstance(exchange_config, dict):
@@ -275,50 +304,46 @@ def build_executor_strategy_payload(payload: Dict[str, Any], *, user_id: int) ->
     preview = preview_executor(cfg)
     kind = cfg["executor_type"]
     strategy_name = str(cfg.get("strategy_name") or cfg.get("name") or f"{kind.upper()} {cfg['symbol']}").strip()
-    market_category = str(cfg.get("market_category") or cfg.get("market") or "Crypto").strip() or "Crypto"
     timeframe = str(cfg.get("timeframe") or "1m").strip() or "1m"
     initial_capital = max(10.0, _float(cfg.get("initial_capital") or cfg.get("investment_amount"), 1000.0))
     trade_direction = "long" if cfg["market_type"] == "spot" else cfg["side"]
     executor_config = preview["config"]
-    take_profit_pct = _ratio(executor_config.get("take_profit_pct"), 0.0)
-    hard_stop_pct = _ratio(executor_config.get("hard_stop_pct"), 0.0)
+    executor_config["dynamic_anchor"] = bool(cfg.get("dynamic_anchor"))
+    if cfg["market_type"] == "spot":
+        executor_config["side"] = "long"
+    if trade_direction == "neutral":
+        raise ValueError("V2_GRID_NEUTRAL_UNSUPPORTED")
+    leverage_enabled = cfg["market_type"] == "swap" and cfg["leverage"] > 1
     trading_config = {
-        "symbol": cfg["symbol"],
-        "timeframe": timeframe,
-        "market_type": cfg["market_type"],
-        "trade_direction": trade_direction,
-        "leverage": cfg["leverage"],
-        "initial_capital": initial_capital,
-        "investment_amount": initial_capital,
-        "tick_interval_sec": 1 if kind in ("layered_martingale", "martingale", "dca") else None,
-        "take_profit_pct": take_profit_pct,
-        "stop_loss_pct": hard_stop_pct,
-        "strategy_family": "executor",
+        "api_version": 2,
+        "strategy_family": "robot",
         "executor_type": kind,
         "executor_config": executor_config,
         "executor_preview": preview,
-        "bot_type": kind,
-        "bot_params": _legacy_bot_params(kind, executor_config),
-        "strategy_config": {
-            "risk": {
-                "takeProfitPct": take_profit_pct,
-                "stopLossPct": hard_stop_pct,
-            }
-        },
     }
-    generated_code = _executor_strategy_code(kind, executor_config, preview)
-    strategy_code = (
-        f'"""\n{strategy_name}\n'
-        f'Editable {kind.replace("_", " ")} robot strategy generated from the visual builder.\n'
-        f'"""\n\n# timeframe: {timeframe}\n\n{generated_code}'
+    generated_code = _executor_code(
+        kind,
+        executor_config,
+        preview,
+        symbol=cfg["symbol"],
+        market_type=cfg["market_type"],
+        timeframe=timeframe,
     )
+    code = (
+        f'"""\n{strategy_name}\n'
+        f'Strategy API V2 {kind.replace("_", " ")} robot generated from the visual builder.\n'
+        f'"""\n\n{generated_code}'
+    )
+    program = compile_strategy_v2(code)
     return {
         "user_id": user_id,
         "strategy_name": strategy_name,
-        "strategy_type": "ScriptStrategy",
-        "strategy_mode": "bot",
-        "strategy_code": strategy_code,
-        "market_category": market_category,
+        "strategy_type": "StrategyV2",
+        "code": code,
+        "asset_type": "script",
+        "template_key": f"robot_v2_{kind}",
+        "description": f"Strategy API V2 {kind.replace('_', ' ')} robot.",
+        "market_category": "Crypto",
         "execution_mode": cfg["execution_mode"],
         "status": "stopped",
         "symbol": cfg["symbol"],
@@ -326,30 +351,45 @@ def build_executor_strategy_payload(payload: Dict[str, Any], *, user_id: int) ->
         "market_type": cfg["market_type"],
         "trade_direction": trade_direction,
         "leverage": cfg["leverage"],
+        "leverage_enabled": leverage_enabled,
         "initial_capital": initial_capital,
         "trading_config": trading_config,
         "exchange_config": exchange_config,
         "notification_config": cfg.get("notification_config") or cfg.get("notificationConfig") or {},
+        "metadata": {
+            "api_version": 2,
+            "source": "robot_builder",
+            "executor_type": kind,
+            "executor_config": executor_config,
+            "strategy_manifest": program.manifest.metadata(),
+        },
+        "compatibility": executor_engine_compatibility(),
     }
 
 
 def _preview_grid(cfg: Dict[str, Any]) -> ExecutorPreview:
     start = _float(cfg.get("start_price") or cfg.get("startPrice"), 0.0)
     end = _float(cfg.get("end_price") or cfg.get("endPrice"), 0.0)
-    total = max(0.0, _float(cfg.get("total_amount_quote") or cfg.get("totalAmountQuote"), 0.0))
-    count = max(1, _int(cfg.get("grid_count") or cfg.get("gridCount"), 1))
+    count = max(2, _int(cfg.get("grid_count") or cfg.get("gridCount"), 2))
+    total = max(0.0, _float(cfg.get("total_amount_quote") or cfg.get("totalAmountQuote"), float(count)))
     side = cfg["side"]
     mode = str(cfg.get("grid_mode") or cfg.get("gridMode") or "arithmetic").strip().lower()
     take_profit = max(0.0, _ratio(cfg.get("take_profit_pct") or cfg.get("takeProfitPct"), 0.004))
     warnings: List[str] = []
     if start <= 0 or end <= 0 or start == end:
         warnings.append("invalid_price_bounds")
-    if total <= 0:
-        warnings.append("missing_total_amount_quote")
     low, high = sorted([start, end])
     prices = _geospace(low, high, count) if mode == "geometric" else _linspace(low, high, count)
     if side == "long":
         prices = sorted(prices, reverse=True)
+    if bool(cfg.get("dynamic_anchor")):
+        reference = (low + high) / 2.0
+        actionable = [
+            price for price in prices
+            if (side == "long" and price < reference) or (side == "short" and price > reference)
+        ]
+        if actionable:
+            prices = actionable
     amount = total / max(1, len(prices))
     levels = []
     for idx, price in enumerate(prices, start=1):
@@ -361,9 +401,9 @@ def _preview_grid(cfg: Dict[str, Any]) -> ExecutorPreview:
     initial_position_raw = (
         cfg.get("initial_position_pct")
         if "initial_position_pct" in cfg
-        else cfg.get("initialPositionPct", 0.2)
+        else cfg.get("initialPositionPct", 0.6)
     )
-    initial_position_pct = min(1.0, max(0.0, _ratio(initial_position_raw, 0.2)))
+    initial_position_pct = min(1.0, max(0.0, _ratio(initial_position_raw, 0.6)))
     if side == "neutral":
         initial_position_pct = 0.0
     config = {
@@ -380,7 +420,6 @@ def _preview_grid(cfg: Dict[str, Any]) -> ExecutorPreview:
         "max_open_orders": max(1, _int(cfg.get("max_open_orders") or cfg.get("maxOpenOrders"), 4)),
         "min_spread_between_orders": max(0.0, _ratio(cfg.get("min_spread_between_orders") or cfg.get("minSpreadBetweenOrders"), 0.0005)),
         "order_frequency": max(0, _int(cfg.get("order_frequency") or cfg.get("orderFrequency"), 0)),
-        "leverage": cfg["leverage"],
     }
     return ExecutorPreview("grid", config, levels, warnings)
 
@@ -483,7 +522,6 @@ def _preview_layered_martingale(cfg: Dict[str, Any]) -> ExecutorPreview:
         "take_profit_pct": take_profit,
         "hard_stop_pct": hard_stop,
         "max_entry_drift_pct": max_entry_drift,
-        "leverage": cfg["leverage"],
     }
     return ExecutorPreview("layered_martingale", config, levels, warnings)
 
@@ -541,413 +579,26 @@ def _preview_layered_dca(cfg: Dict[str, Any], kind: str) -> ExecutorPreview:
         "take_profit_pct": take_profit,
         "hard_stop_pct": max(0.0, _ratio(cfg.get("hard_stop_pct") or cfg.get("hardStopPct"), 0.0)),
         "max_entry_drift_pct": max_entry_drift,
-        "leverage": cfg["leverage"],
     }
     return ExecutorPreview(kind, config, levels, warnings)
 
 
-def _legacy_bot_params(kind: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    side = config.get("side") or "long"
-    take_profit_pct = float(config.get("take_profit_pct") or 0.0)
-    hard_stop_pct = float(config.get("hard_stop_pct") or 0.0)
-    base = float(config.get("base_order_size") or 0.0)
-    safety = float(config.get("safety_order_size") or base or 0.0)
-    max_layers = max(1, int(config.get("max_layers") or 1))
-    volume_multiplier = max(1.0, float(config.get("volume_multiplier") or 1.0))
-    total_amount = float(config.get("total_amount_quote") or 0.0)
-    if total_amount <= 0 and kind in ("dca", "martingale"):
-        total_amount = base
-        for layer in range(2, max_layers + 1):
-            total_amount += safety * (volume_multiplier ** (layer - 2))
-    if kind == "grid":
-        return {
-            "lowerPrice": config.get("start_price"),
-            "upperPrice": config.get("end_price"),
-            "gridCount": config.get("grid_count"),
-            "amountPerGrid": (
-                float(config.get("total_amount_quote") or 0.0) / max(1, int(config.get("grid_count") or 1))
-            ),
-            "gridMode": config.get("grid_mode") or "arithmetic",
-            "gridDirection": config.get("side") or "long",
-            "orderMode": "maker",
-            "boundaryAction": "pause",
-            "initialPositionPct": float(config.get("initial_position_pct") or 0.0) * 100.0,
-            "maxOpenOrders": config.get("max_open_orders") or 999999,
-            "minSpreadBetweenOrders": config.get("min_spread_between_orders") or 0.0,
-            "orderFrequency": config.get("order_frequency") or 0,
-        }
-    if kind == "martingale":
-        return {
-            "direction": side,
-            "multiplier": volume_multiplier,
-            "maxLayers": max_layers,
-            "priceDropPct": float(config.get("price_deviation_pct") or 0.0) * 100.0,
-            "takeProfitPct": take_profit_pct * 100.0,
-            "stopLossPct": hard_stop_pct * 100.0,
-            "trailingTpEnabled": False,
-            "trailingTpCallbackPct": 0.8,
-            "waterfallProtection": True,
-            "waterfallDropPct": max(0.005, float(config.get("price_deviation_pct") or 0.0) * 2.0),
-        }
-    if kind == "dca":
-        return {
-            "direction": side,
-            "frequency": "every_bar",
-            "amountEach": base,
-            "totalBudget": total_amount,
-            "dipBuyEnabled": True,
-            "dipThreshold": float(config.get("price_deviation_pct") or 0.0) * 100.0,
-            "takeProfitPct": take_profit_pct,
-            "stopLossPct": hard_stop_pct,
-        }
-    if kind == "layered_martingale":
-        return {
-            "direction": side,
-            "layerCount": int(config.get("layer_count") or 5),
-            "ordersPerLayer": int(config.get("orders_per_layer") or 3),
-            "baseOrderSize": base,
-            "multiplier": volume_multiplier,
-            "intraSpacings": list(config.get("intra_spacings") or []),
-            "interSpacings": list(config.get("inter_spacings") or []),
-            "takeProfitPct": take_profit_pct,
-            "stopLossPct": hard_stop_pct,
-        }
-    return dict(config)
+def _executor_code(
+    kind: str,
+    config: Dict[str, Any],
+    preview: Dict[str, Any],
+    *,
+    symbol: str,
+    market_type: str,
+    timeframe: str,
+) -> str:
+    from .robot_v2 import build_robot_v2_source
 
-
-def executor_runtime_params(kind: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """Compile an editable robot definition into host runtime parameters."""
-    clean_kind = str(kind or "").strip().lower()
-    if clean_kind not in EXECUTOR_TYPES:
-        raise ValueError(f"unsupported_executor_type:{clean_kind}")
-    if not isinstance(config, dict):
-        raise ValueError("invalid_executor_config")
-    return _legacy_bot_params(clean_kind, dict(config))
-
-
-def _executor_strategy_code(kind: str, config: Dict[str, Any], preview: Dict[str, Any]) -> str:
-    if kind == "grid":
-        return _grid_strategy_code(config, preview)
-    if kind in ("dca", "martingale"):
-        return _layered_dca_strategy_code(kind, config, preview)
-    if kind == "layered_martingale":
-        return _layered_martingale_strategy_code(config, preview)
-    return """def on_bar(ctx, bar):
-    pass
-"""
-
-
-def _grid_strategy_code(config: Dict[str, Any], preview: Dict[str, Any]) -> str:
-    levels = [
-        {
-            "level": int((item or {}).get("level") or 0),
-            "side": str((item or {}).get("side") or "long"),
-            "price": float((item or {}).get("price") or 0.0),
-            "amount_quote": float((item or {}).get("amount_quote") or 0.0),
-        }
-        for item in (preview.get("levels") or [])
-    ]
-    take_profit = float(config.get("take_profit_pct") or 0.0)
-    return f'''# Built-in grid robot definition.
-# Live mode uses durable resting orders, fill polling, and reconciliation from the host.
-# Backtests use the candle high/low crossing model below and therefore remain bar-resolution simulations.
-
-ROBOT_CONFIG = {repr(dict(config))}
-GRID_LEVELS = {repr(levels)}
-TAKE_PROFIT = {take_profit!r}
-
-def on_init(ctx):
-    ctx.configure_robot("grid", ROBOT_CONFIG)
-    if ctx.state.get("grid_submitted") is None:
-        ctx.state.set("grid_submitted", {{}})
-    ctx.log("grid robot configured")
-
-def _is_backtest(ctx):
-    return str(ctx.runtime.get("execution_environment", "")).lower() == "backtest"
-
-def _position(ctx, side):
-    try:
-        return ctx.positions.get(side, {{}})
-    except Exception:
-        return {{}}
-
-def _reset_side(ctx, side):
-    submitted = dict(ctx.state.get("grid_submitted", {{}}) or {{}})
-    for key in list(submitted.keys()):
-        if key.startswith(side + ":"):
-            submitted.pop(key, None)
-    ctx.state.set("grid_submitted", submitted)
-
-def on_bar(ctx, bar):
-    if not _is_backtest(ctx):
-        return
-    submitted = dict(ctx.state.get("grid_submitted", {{}}) or {{}})
-    for side in ("long", "short"):
-        position = _position(ctx, side)
-        size = float(position.get("size", 0.0) or 0.0)
-        entry = float(position.get("entry_price", 0.0) or 0.0)
-        if size <= 0 or entry <= 0 or TAKE_PROFIT <= 0:
-            continue
-        reached = bar.high >= entry * (1.0 + TAKE_PROFIT) if side == "long" else bar.low <= entry * (1.0 - TAKE_PROFIT)
-        if reached:
-            ctx.basket(side).close_all(reason="grid_take_profit")
-            _reset_side(ctx, side)
-            return
-    for level in GRID_LEVELS:
-        side = str(level.get("side") or "long")
-        price = float(level.get("price") or 0.0)
-        amount = float(level.get("amount_quote") or 0.0)
-        key = "%s:%s" % (side, int(level.get("level") or 0))
-        if submitted.get(key) or price <= 0 or amount <= 0:
-            continue
-        if float(bar.low) <= price <= float(bar.high):
-            side_has_orders = any(existing.startswith(side + ":") for existing in submitted)
-            ctx.basket(side).open_child_order(
-                layer=int(level.get("level") or 1),
-                order=1,
-                notional=amount,
-                price=price,
-                action="add" if side_has_orders else "open",
-                payload={{"reason": "grid_level"}},
-            )
-            submitted[key] = True
-    ctx.state.set("grid_submitted", submitted)
-'''
-
-
-def _layered_dca_strategy_code(kind: str, config: Dict[str, Any], preview: Dict[str, Any]) -> str:
-    levels = preview.get("levels") if isinstance(preview, dict) else []
-    prices = [float((level or {}).get("price") or 0.0) for level in levels or []]
-    amounts = [float((level or {}).get("amount_quote") or 0.0) for level in levels or []]
-    side = str(config.get("side") or "long").strip().lower()
-    if side not in ("long", "short"):
-        side = "long"
-    take_profit = float(config.get("take_profit_pct") or 0.0)
-    hard_stop = float(config.get("hard_stop_pct") or 0.0)
-    max_entry_drift = float(config.get("max_entry_drift_pct") or 0.0)
-    label = "Martingale" if kind == "martingale" else "DCA"
-    return f"""# Built-in {label} executor.
-# Prices and quote amounts are generated from the executor config before runtime.
-
-PRICES = {repr(prices)}
-AMOUNTS = {repr(amounts)}
-SIDE = {repr(side)}
-TAKE_PROFIT = {take_profit!r}
-HARD_STOP = {hard_stop!r}
-MAX_ENTRY_DRIFT = {max_entry_drift!r}
-
-def on_init(ctx):
-    if ctx.state.get("next_level") is None:
-        ctx.state.set("next_level", 0)
-    if ctx.state.get("total_cost") is None:
-        ctx.state.set("total_cost", 0.0)
-    if ctx.state.get("total_qty") is None:
-        ctx.state.set("total_qty", 0.0)
-
-def _reset(ctx):
-    ctx.state.update({{"next_level": 0, "total_cost": 0.0, "total_qty": 0.0}})
-
-def _has_position(ctx):
-    try:
-        return bool(ctx.position and float(ctx.position.get("size", 0)) > 0)
-    except Exception:
-        return False
-
-def _avg_price(ctx):
-    try:
-        actual = float(ctx.position.get("entry_price", 0) or 0)
-        if actual > 0:
-            return actual
-    except Exception:
-        pass
-    total_cost = float(ctx.state.get("total_cost", 0.0) or 0.0)
-    total_qty = float(ctx.state.get("total_qty", 0.0) or 0.0)
-    return total_cost / total_qty if total_cost > 0 and total_qty > 0 else 0.0
-
-def _entry_due(level, price):
-    if level <= 0:
-        return True
-    target = float(PRICES[level] or 0.0)
-    if target <= 0:
-        return False
-    if SIDE == "short":
-        return price >= target
-    return price <= target
-
-def _open_level(ctx, level, price):
-    amount = float(AMOUNTS[level] or 0.0)
-    if amount <= 0 or price <= 0:
-        return
-    ctx.basket(SIDE).open_child_order(
-        layer=level + 1,
-        order=1,
-        notional=amount,
-        price=price,
-        action="open" if level == 0 else "add",
-        payload={{"reason": "{kind}_level"}},
+    return build_robot_v2_source(
+        kind,
+        config,
+        preview,
+        symbol=symbol,
+        market_type=market_type,
+        timeframe=timeframe,
     )
-    ctx.state.set("next_level", level + 1)
-    ctx.state.set("total_cost", float(ctx.state.get("total_cost", 0.0) or 0.0) + amount)
-    ctx.state.set("total_qty", float(ctx.state.get("total_qty", 0.0) or 0.0) + (amount / price))
-    ctx.log("{label} level %d submitted: %.2f quote @ %.8f" % (level + 1, amount, price))
-
-def on_bar(ctx, bar):
-    price = float(bar.close or 0.0)
-    if price <= 0 or not PRICES or not AMOUNTS:
-        return
-    next_level = int(ctx.state.get("next_level", 0) or 0)
-    if next_level == 0 and MAX_ENTRY_DRIFT > 0 and float(PRICES[0] or 0.0) > 0:
-        entry_drift = abs(price - float(PRICES[0])) / float(PRICES[0])
-        if entry_drift > MAX_ENTRY_DRIFT:
-            ctx.log("{label} entry blocked: market drift %.4f exceeds %.4f" % (entry_drift, MAX_ENTRY_DRIFT))
-            return
-    has_pos = _has_position(ctx)
-    if not has_pos and next_level > 0:
-        _reset(ctx)
-        next_level = 0
-
-    if has_pos:
-        avg = _avg_price(ctx)
-        if avg > 0:
-            if SIDE == "short":
-                profit = (avg - price) / avg
-                loss = (price - avg) / avg
-            else:
-                profit = (price - avg) / avg
-                loss = (avg - price) / avg
-            if TAKE_PROFIT > 0 and profit >= TAKE_PROFIT:
-                ctx.basket(SIDE).close_all(reason="{kind}_take_profit")
-                _reset(ctx)
-                ctx.log("{label} take-profit submitted")
-                return
-            if HARD_STOP > 0 and loss >= HARD_STOP:
-                ctx.basket(SIDE).close_all(reason="{kind}_hard_stop")
-                _reset(ctx)
-                ctx.log("{label} hard-stop submitted")
-                return
-
-    if next_level < len(PRICES) and _entry_due(next_level, price):
-        _open_level(ctx, next_level, price)
-"""
-
-
-def _layered_martingale_strategy_code(config: Dict[str, Any], preview: Dict[str, Any]) -> str:
-    levels = preview.get("levels") if isinstance(preview, dict) else []
-    prices = [float((level or {}).get("price") or 0.0) for level in levels or []]
-    amounts = [float((level or {}).get("amount_quote") or 0.0) for level in levels or []]
-    layer_indexes = [int((level or {}).get("layer_index") or 0) for level in levels or []]
-    order_indexes = [int((level or {}).get("order_index") or 0) for level in levels or []]
-    side = str(config.get("side") or "long").strip().lower()
-    if side not in ("long", "short"):
-        side = "long"
-    take_profit = float(config.get("take_profit_pct") or 0.0)
-    hard_stop = float(config.get("hard_stop_pct") or 0.0)
-    max_entry_drift = float(config.get("max_entry_drift_pct") or 0.0)
-    return f"""# Built-in layered martingale basket executor.
-# It runs sequential basket child orders: layer -> order -> next layer.
-
-PRICES = {repr(prices)}
-AMOUNTS = {repr(amounts)}
-LAYERS = {repr(layer_indexes)}
-ORDERS = {repr(order_indexes)}
-SIDE = {repr(side)}
-TAKE_PROFIT = {take_profit!r}
-HARD_STOP = {hard_stop!r}
-MAX_ENTRY_DRIFT = {max_entry_drift!r}
-
-def on_init(ctx):
-    if ctx.state.get("next_index") is None:
-        ctx.state.set("next_index", 0)
-    if ctx.state.get("total_cost") is None:
-        ctx.state.set("total_cost", 0.0)
-    if ctx.state.get("total_qty") is None:
-        ctx.state.set("total_qty", 0.0)
-
-def _reset(ctx):
-    ctx.state.update({{"next_index": 0, "total_cost": 0.0, "total_qty": 0.0}})
-
-def _has_position(ctx):
-    try:
-        return bool(ctx.position and float(ctx.position.get("size", 0)) > 0)
-    except Exception:
-        return False
-
-def _avg_price(ctx):
-    try:
-        actual = float(ctx.position.get("entry_price", 0) or 0)
-        if actual > 0:
-            return actual
-    except Exception:
-        pass
-    total_cost = float(ctx.state.get("total_cost", 0.0) or 0.0)
-    total_qty = float(ctx.state.get("total_qty", 0.0) or 0.0)
-    return total_cost / total_qty if total_cost > 0 and total_qty > 0 else 0.0
-
-def _entry_due(index, price):
-    if index <= 0:
-        return True
-    target = float(PRICES[index] or 0.0)
-    if target <= 0:
-        return False
-    if SIDE == "short":
-        return price >= target
-    return price <= target
-
-def _submit_child(ctx, index, price):
-    amount = float(AMOUNTS[index] or 0.0)
-    if amount <= 0 or price <= 0:
-        return
-    layer = int(LAYERS[index] or 1)
-    order = int(ORDERS[index] or 1)
-    action = "open" if index == 0 else "add"
-    ctx.basket(SIDE).open_child_order(
-        layer=layer,
-        order=order,
-        notional=amount,
-        price=price,
-        action=action,
-        payload={{"reason": "layered_martingale_child"}},
-    )
-    ctx.state.set("next_index", index + 1)
-    ctx.state.set("total_cost", float(ctx.state.get("total_cost", 0.0) or 0.0) + amount)
-    ctx.state.set("total_qty", float(ctx.state.get("total_qty", 0.0) or 0.0) + (amount / price))
-    ctx.log("Layered martingale L%d/O%d submitted: %.2f quote @ %.8f" % (layer, order, amount, price))
-
-def on_bar(ctx, bar):
-    price = float(bar.close or 0.0)
-    if price <= 0 or not PRICES or not AMOUNTS:
-        return
-    next_index = int(ctx.state.get("next_index", 0) or 0)
-    if next_index == 0 and MAX_ENTRY_DRIFT > 0 and float(PRICES[0] or 0.0) > 0:
-        entry_drift = abs(price - float(PRICES[0])) / float(PRICES[0])
-        if entry_drift > MAX_ENTRY_DRIFT:
-            ctx.log("Layered martingale entry blocked: market drift %.4f exceeds %.4f" % (entry_drift, MAX_ENTRY_DRIFT))
-            return
-    has_pos = _has_position(ctx)
-    if not has_pos and next_index > 0:
-        _reset(ctx)
-        next_index = 0
-
-    if has_pos:
-        avg = _avg_price(ctx)
-        if avg > 0:
-            if SIDE == "short":
-                profit = (avg - price) / avg
-                loss = (price - avg) / avg
-            else:
-                profit = (price - avg) / avg
-                loss = (avg - price) / avg
-            if TAKE_PROFIT > 0 and profit >= TAKE_PROFIT:
-                ctx.basket(SIDE).close_all(reason="layered_martingale_take_profit")
-                _reset(ctx)
-                ctx.log("Layered martingale average take-profit submitted")
-                return
-            if HARD_STOP > 0 and loss >= HARD_STOP:
-                ctx.basket(SIDE).close_all(reason="layered_martingale_hard_stop")
-                _reset(ctx)
-                ctx.log("Layered martingale hard-stop submitted")
-                return
-
-    if next_index < len(PRICES) and _entry_due(next_index, price):
-        _submit_child(ctx, next_index, price)
-"""

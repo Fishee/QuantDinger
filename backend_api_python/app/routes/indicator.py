@@ -25,9 +25,8 @@ from app.services.ai_generation_contracts import (
     INDICATOR_GENERATION_CONTRACT,
     INDICATOR_REPAIR_REQUIREMENTS,
 )
-from app.services.indicator_workspace import is_indicator_ide_listable, resolve_indicator_asset_type
+from app.services.indicator_workspace import is_indicator_ide_listable
 from app.services.indicator_versions import (
-    ensure_indicator_version_schema,
     get_version as get_indicator_code_version,
     insert_indicator_version,
     list_versions as list_indicator_code_versions,
@@ -77,10 +76,6 @@ def _extract_indicator_meta_from_code(code: str) -> Dict[str, str]:
     name = (name_match.group(2).strip() if name_match else "")[:100]
     description = (desc_match.group(2).strip() if desc_match else "")[:500]
     return {"name": name, "description": description}
-
-
-def _ensure_indicator_version_schema(cur) -> None:
-    ensure_indicator_version_schema(cur)
 
 
 def _insert_indicator_version(cur, indicator_id: int, user_id: int, name: str, description: str, code: str) -> int:
@@ -185,9 +180,9 @@ def _indicator_hint_to_text(hint_code: str, params: Dict[str, Any] | None = None
     if hint_code == "MISSING_OUTPUT":
         return "Missing output dictionary."
     if hint_code == "EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR":
-        return "Execution columns are ignored in chart indicators. Convert this idea to a script strategy before backtesting or live trading."
+        return "Execution columns are ignored in chart indicators. Convert this idea to Strategy API V2 before backtesting or live trading."
     if hint_code == "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR":
-        return "# @strategy annotations are ignored in chart indicators. Put risk, sizing, timeframe, and execution rules in Script Strategy code."
+        return "# @strategy annotations are forbidden in chart indicators. Put risk, sizing, timeframe, and execution rules in Strategy API V2 code."
     if hint_code == "MISSING_DF_COPY":
         return "Missing df = df.copy()."
     if hint_code == "MISSING_INDICATOR_NAME":
@@ -289,12 +284,6 @@ def get_indicators():
 
         with get_db_connection() as db:
             cur = db.cursor()
-            # Best-effort schema upgrade for VIP-free indicators
-            try:
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS vip_free BOOLEAN DEFAULT FALSE")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) DEFAULT 'indicator'")
-            except Exception:
-                pass
             # Get user's own indicators (both purchased and custom).
             cur.execute(
                 """
@@ -357,34 +346,20 @@ def save_indicator():
         except Exception:
             price = 0.0
         preview_image = (data.get("previewImage") or data.get("preview_image") or "").strip()
-        asset_type = (data.get("assetType") or data.get("asset_type") or "indicator").strip() or "indicator"
-        if asset_type not in ("indicator", "script_template"):
-            asset_type = "indicator"
-
-        asset_type = resolve_indicator_asset_type(code, asset_type)
+        asset_type = "indicator"
 
         if not code or not str(code).strip():
             return jsonify({"code": 0, "msg": "code is required", "data": None}), 400
 
-        if asset_type == "script_template":
-            from app.routes.strategy import _validate_strategy_code_internal
-            validation = _validate_strategy_code_internal(code)
-            if not validation.get("success"):
-                return jsonify({
-                    "code": 0,
-                    "msg": validation.get("message") or "Unsafe script template code",
-                    "data": None,
-                }), 400
-        else:
-            from app.utils.safe_exec import validate_code_safety
+        from app.utils.safe_exec import validate_code_safety
 
-            is_safe_code, unsafe_reason = validate_code_safety(code)
-            if not is_safe_code:
-                return jsonify({
-                    "code": 0,
-                    "msg": f"Unsafe indicator code: {unsafe_reason}",
-                    "data": None,
-                }), 400
+        is_safe_code, unsafe_reason = validate_code_safety(code)
+        if not is_safe_code:
+            return jsonify({
+                "code": 0,
+                "msg": f"Unsafe indicator code: {unsafe_reason}",
+                "data": None,
+            }), 400
 
         # Local dev UX: if name/description not provided, derive from code variables.
         if not name or not description:
@@ -404,17 +379,6 @@ def save_indicator():
         
         with get_db_connection() as db:
             cur = db.cursor()
-            # Best-effort schema upgrade for VIP-free indicators
-            try:
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS vip_free BOOLEAN DEFAULT FALSE")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type VARCHAR(32) DEFAULT 'indicator'")
-                # i18n columns (see services/indicator_translator.py)
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_language VARCHAR(16)")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS name_i18n JSONB")
-                cur.execute("ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS description_i18n JSONB")
-                _ensure_indicator_version_schema(cur)
-            except Exception:
-                pass
             existing_is_buy = 0
             if indicator_id and indicator_id > 0:
                 cur.execute(
@@ -504,7 +468,6 @@ def save_indicator():
                 )
                 indicator_id = int(cur.lastrowid or 0)
             if indicator_id and indicator_id > 0:
-                _ensure_indicator_version_schema(cur)
                 _insert_indicator_version(cur, indicator_id, user_id, name, description, code)
             db.commit()
             cur.close()
@@ -737,13 +700,13 @@ def ai_generate():
     # QuantDinger indicator IDE: chart render only; strategies are separate script assets.
     SYSTEM_PROMPT = """# Role
 
-You write production-ready **QuantDinger** chart indicator scripts: Python that runs in the Indicator IDE and renders overlays/markers on the K-line chart. Indicators are **not executable strategies**: they must not open, close, size, backtest, or live trade. If a user wants trading logic, keep this file as a visual indicator and let the Strategy Script workflow generate an executable script strategy separately.
+You write production-ready **QuantDinger** chart indicator scripts: Python that runs in the Indicator IDE and renders overlays/markers on the K-line chart. Indicators are **not executable strategies**: they must not open, close, size, backtest, or live trade. If a user wants trading logic, keep this file as a visual indicator and let the Strategy API V2 workflow generate executable strategy code separately.
 
 # Runtime (strict)
 
 - Environment: browser-side Pyodide-style sandbox **or** API verify sandbox: **no network**, no file I/O, no subprocess.
 - **`pd` and `np` are already available.** Do **not** write `import pandas` / `import numpy`. Avoid any `import` unless unavoidable; never import `os`, `sys`, `requests`, `socket`, `subprocess`, `threading`, `sqlite3`, `multiprocessing`, or other I/O/network modules.
-- Do **not** use: `eval`, `exec`, `compile`, `open`, `__import__`, `getattr`/`setattr`/`delattr` on untrusted names, `globals`, `vars`, `dir`, or meta-programming to escape the sandbox. `locals()` is allowed if needed to assemble `output` (backtest/verify allow it); avoid `globals()`.
+- Do **not** use: `eval`, `exec`, `compile`, `open`, `__import__`, `getattr`/`setattr`/`delattr` on untrusted names, `locals`, `globals`, `vars`, `dir`, or meta-programming to escape the sandbox.
 - Allowed imports only: `numpy`, `pandas`, `math`, `json`, `datetime`, `time`, `collections`, `functools`, `itertools`, `statistics`, `decimal`, `fractions`, `copy`. **Never** `import operator`.
 - Work **vectorized** with pandas on `df` where possible; avoid O(n) Python loops over every row for core series (rolling/ewm/shift are preferred).
 
@@ -786,14 +749,14 @@ Self-check before returning code: every place where you call `.rolling` / `.fill
 - Do **not** create or require execution columns such as `df['open_long']`, `df['close_long']`, `df['open_short']`, `df['close_short']`, `df['add_long']`, or `df['reduce_long']`.
 - Do **not** emit `# @strategy`, `# signal_form`, `# exit_owner`, `# flip_mode`, `# timeframe`, risk defaults, position sizing, stop-loss, take-profit, trailing-stop, leverage, or trade-direction settings.
 - `output['signals']` are visual chart markers only. They never place orders.
-- If the user asks for a strategy, still return a chart indicator here: plots and visual markers that express the idea. The executable strategy belongs in Script Strategy.
+- If the user asks for a strategy, still return a chart indicator here: plots and visual markers that express the idea. Executable strategy code belongs in Strategy API V2.
 
 # User intent handling
 
 - Treat the user's text as product requirements, not as literal code unless they paste code.
 - Infer sensible defaults when the request is incomplete, but keep the code simple, readable, and stable.
 - If the user mentions a well-known indicator family, implement the core concept and add useful visual context rather than overfitting to one screenshot.
-- Use short English identifiers in code. User-facing labels may follow the user's language when it improves readability.
+- Use English for identifiers, metadata, comments, `@param` descriptions, and default plot, signal, and layer labels. Localize display labels only when the user explicitly requests a target language.
 - The current chart symbol/timeframe may be provided as context. Use it to choose sensible examples only; do **not** hardcode symbol, exchange, timeframe, account, leverage, or risk into indicator code.
 
 # Chart output: `output` dict (strict)
@@ -808,7 +771,10 @@ After computation, set:
   - `type`: optional, e.g. `'line'`.
   - Price-scale series (MA, Bollinger on price): `overlay: True`. Oscillators (RSI 0-100): `overlay: False`.
 - **`signals`**: optional list for markers; each item:
-  - `type`: `'buy'` or `'sell'`, `text` (short label), `color`, `data`: list length **`len(df)`**, value `None` or a float price for marker Y.
+  - `type`: `'buy'` or `'sell'` controls marker orientation only; it is not the signal name.
+  - `text`: a stable descriptive signal name. Optional `textData` may provide a different label for each bar. Signal names are dynamic and are not limited to `Buy`, `Sell`, `Long Entry`, or `Long Exit`.
+  - `color`, `data`: list length **`len(df)`**, value `None` or a float price for marker Y.
+  - Only a finite numeric value in `data[i]` activates the signal on bar `i`. Static `text` or `textData` is label content only and must never activate a signal.
   - Signal markers must usually represent **events**, not continuous states. If a condition can stay true for many bars, mark only the transition bar with an edge/flip condition. This prevents noisy charts and repeated signal notifications.
 - **`layers`**: optional list for advanced K-line overlays. Do not add layers by default. Use layers only when the user explicitly asks for zones, channels, support/resistance, invalidation areas, or when one sparse annotation materially improves readability. Prefer plots and signals for normal indicators.
   - Zone layer: `{ 'type': 'zone', 'startIndex': int, 'endIndex': int, 'top': float, 'bottom': float, 'text': str, 'fillColor': '#RRGGBB', 'borderColor': '#RRGGBB', 'opacity': 0.12 }`.
@@ -849,7 +815,7 @@ Never use declared parameter names directly unless you first assign them from `p
 
 # Strategy defaults
 
-Do not use `# @strategy` in indicator code. Strategy defaults belong in Script Strategy code, not chart indicators.
+Do not use `# @strategy` in indicator code. Strategy defaults belong in Strategy API V2 code, not chart indicators.
 
 # Quality bar
 
@@ -857,9 +823,9 @@ Do not use `# @strategy` in indicator code. Strategy defaults belong in Script S
 - Ensure visual markers are useful but not noisy. Do not widen or replace the requested signal condition merely to create more markers.
 - Use unambiguous marker text such as `Long Entry`, `Long Exit`, `Short Entry`, `Short Exit`, or `Warning`; a generic bearish/sell marker must not imply a short entry when it only exits a long position.
 - For notification-safe markers, convert state signals into one-bar events by default:
-  - `def edge(s): s = s.fillna(False).astype(bool); return s & ~s.shift(1).fillna(False)`
+  - `def edge(s): s = s.fillna(False).astype(bool); previous = s.shift(1, fill_value=False).astype(bool); return s & ~previous`
   - Use `edge(condition)` for `output['signals']` unless the user explicitly asks for every bar where a condition is true.
-  - If the user requests "confirmed next bar" behavior, compute the raw condition on closed bars and shift the event one bar forward for display/notification: `confirmed = edge(raw_condition).shift(1).fillna(False)`.
+  - If the user requests "confirmed next bar" behavior, compute the raw condition on closed bars and shift the event one bar forward for display/notification: `confirmed = edge(raw_condition).shift(1, fill_value=False).astype(bool)`.
 - For state/regime visuals that should persist across bars, use overlay/non-overlay plots, lamp belts, or sparse layers instead of repeating `output['signals']` markers every bar.
 - For signal markers, prefer explicit lists with `None` for empty bars:
   - `buy_marks = [df['low'].iloc[i] * 0.995 if bool(buy_signal.iloc[i]) else None for i in range(len(df))]`
@@ -1032,7 +998,7 @@ Return **only** valid Python source: **no** markdown fences, **no** ` ``` `, **n
         issues_text = _format_validation_issues(validation)
         repair_prompt = (
             "You produced QuantDinger indicator code that failed automatic validation. "
-            "Fix the code while preserving the user's trading idea and parameters. "
+            "Fix the code while preserving the user's visual indicator idea and parameters. "
             "Return one full replacement script only.\n\n"
             f"# Original user request\n{prompt}\n\n"
             f"# Validation issues to fix\n{issues_text}\n\n"
@@ -1257,8 +1223,4 @@ def code_quality_hints():
             )
 
     return jsonify({"code": 1, "data": {"hints": hints}})
-
-
-# openapi-compat: legacy import name
-indicator_bp = indicator_blp
 

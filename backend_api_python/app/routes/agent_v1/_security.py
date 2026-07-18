@@ -55,7 +55,7 @@ def redact_strategy_row(row: dict | None) -> dict | None:
     if not row:
         return row
     out = dict(row)
-    for field in ("exchange_config", "trading_config", "notification_config", "ai_model_config"):
+    for field in ("exchange_config", "trading_config", "notification_config"):
         if isinstance(out.get(field), dict):
             out[field] = redact_secrets(out[field])
     return out

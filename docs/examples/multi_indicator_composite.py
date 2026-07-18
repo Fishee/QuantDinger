@@ -76,8 +76,10 @@ if use_macd:
 if use_volume:
     buy_condition = buy_condition & volume_ok.fillna(False)
 
-buy_edge = buy_condition & ~buy_condition.shift(1).fillna(False)
-sell_edge = sell_condition & ~sell_condition.shift(1).fillna(False)
+buy_state = buy_condition.fillna(False).astype(bool)
+sell_state = sell_condition.fillna(False).astype(bool)
+buy_edge = buy_state & ~buy_state.shift(1, fill_value=False).astype(bool)
+sell_edge = sell_state & ~sell_state.shift(1, fill_value=False).astype(bool)
 
 buy_marks = [
     float(low.iloc[i] * 0.995) if bool(buy_edge.iloc[i]) else None
