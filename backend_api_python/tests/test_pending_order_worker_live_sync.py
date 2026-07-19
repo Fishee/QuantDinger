@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.services import pending_order_worker as worker_module
-from app.services.pending_orders.sent_order_recovery import normalize_live_order_status
+from app.services.pending_orders.sent_order_recovery import is_final_fill, normalize_live_order_status
 
 
 def _row(*, filled: float, avg_price: float):
@@ -142,30 +142,15 @@ def test_live_sent_sync_keeps_terminal_fill_open_when_average_price_is_missing(m
 
 
 def test_exchange_filled_status_accepts_quantity_precision_remainder():
-    assert worker_module._is_final_fill(
-        requested=0.1617456789,
-        filled=0.161745,
-        avg_price=58_705.0,
-        status="FILLED",
-    ) is True
+    assert is_final_fill(0.1617456789, 0.161745, 58_705.0, "FILLED") is True
 
 
 def test_non_terminal_partial_fill_remains_open():
-    assert worker_module._is_final_fill(
-        requested=1.0,
-        filled=0.75,
-        avg_price=58_705.0,
-        status="PARTIALLY_FILLED",
-    ) is False
+    assert is_final_fill(1.0, 0.75, 58_705.0, "PARTIALLY_FILLED") is False
 
 
 def test_terminal_fill_without_average_price_remains_open():
-    assert worker_module._is_final_fill(
-        requested=1.0,
-        filled=1.0,
-        avg_price=0.0,
-        status="FILLED",
-    ) is False
+    assert is_final_fill(1.0, 1.0, 0.0, "FILLED") is False
 
 
 def test_ibkr_submission_never_fabricates_a_fill_from_requested_amount(monkeypatch):
