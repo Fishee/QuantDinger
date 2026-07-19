@@ -48,6 +48,7 @@ def record_runtime_heartbeat(
     symbol: str,
     price: float,
     pending_signal_count: int,
+    loop_latency_ms: int = 0,
     status: str = "healthy",
     last_error: str = "",
 ) -> None:
@@ -65,6 +66,8 @@ def record_runtime_heartbeat(
         "symbol": str(symbol or ""),
         "last_price": float(price or 0.0),
         "pending_signal_count": max(0, int(pending_signal_count or 0)),
+        "loop_latency_ms": max(0, int(loop_latency_ms or 0)),
+        "latency_ms": max(0, int(loop_latency_ms or 0)),
         "status": str(status or "healthy"),
         "last_error": str(last_error or "")[:1000],
     })
@@ -78,6 +81,8 @@ def _empty_snapshot() -> Dict[str, Any]:
         "started_at": None,
         "last_heartbeat_at": 0,
         "heartbeat_age_sec": None,
+        "loop_latency_ms": 0,
+        "latency_ms": 0,
         "last_price": 0.0,
         "last_error": "",
         "last_event_at": None,
@@ -161,6 +166,8 @@ def _load_health_state(snapshots, placeholders, ids):
             "last_error": str(state.get("last_error") or ""),
             "runtime_reported_status": str(state.get("status") or ""),
             "pending_signals": int(state.get("pending_signal_count") or 0),
+            "loop_latency_ms": max(0, int(state.get("loop_latency_ms") or 0)),
+            "latency_ms": max(0, int(state.get("latency_ms") or state.get("loop_latency_ms") or 0)),
         })
 
 

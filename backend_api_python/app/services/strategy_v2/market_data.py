@@ -35,6 +35,13 @@ PROVIDER_TIMEFRAMES = {
 }
 
 
+def _normalize_utc_datetime(value: datetime) -> datetime:
+    """Return an aware UTC datetime, interpreting naive inputs as UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def load_strategy_frame(
     market: str,
     symbol: str,
@@ -45,21 +52,23 @@ def load_strategy_frame(
     market_type: Optional[str] = None,
     exchange_id: Optional[str] = None,
 ) -> pd.DataFrame:
-    total_seconds = max(1.0, (end_date - start_date).total_seconds())
+    start_utc = _normalize_utc_datetime(start_date)
+    end_utc = _normalize_utc_datetime(end_date)
+    total_seconds = max(1.0, (end_utc - start_utc).total_seconds())
     normalized_timeframe = str(timeframe or "1d").strip().lower()
     timeframe_seconds = TIMEFRAME_SECONDS.get(normalized_timeframe, 86400)
     provider_timeframe = PROVIDER_TIMEFRAMES.get(normalized_timeframe, normalized_timeframe)
     limit = int(math.ceil(total_seconds / timeframe_seconds * 1.15) + 200)
-    after_time = int((start_date - timedelta(seconds=timeframe_seconds)).timestamp())
-    before_time = int((end_date + timedelta(seconds=timeframe_seconds)).timestamp())
+    after_time = int((start_utc - timedelta(seconds=timeframe_seconds)).timestamp())
+    before_time = int((end_utc + timedelta(seconds=timeframe_seconds)).timestamp())
     cache_key = ":".join((
         str(market),
         str(symbol),
         str(timeframe),
         str(market_type or ""),
         str(exchange_id or ""),
-        start_date.isoformat(),
-        end_date.isoformat(),
+        start_utc.isoformat(),
+        end_utc.isoformat(),
     ))
     cached = _cache.get(cache_key)
     if cached is not None and not cached.empty:
@@ -109,8 +118,8 @@ def load_strategy_frame(
         if column not in frame.columns:
             frame[column] = 0.0
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    requested_start = pd.Timestamp(start_date).tz_localize(None)
-    requested_end = pd.Timestamp(end_date).tz_localize(None)
+    requested_start = pd.Timestamp(start_utc).tz_localize(None)
+    requested_end = pd.Timestamp(end_utc).tz_localize(None)
     frame = frame[(frame.index >= requested_start) & (frame.index <= requested_end)].dropna(
         subset=["open", "high", "low", "close"]
     )

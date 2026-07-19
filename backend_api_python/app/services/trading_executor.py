@@ -8,7 +8,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -327,7 +327,7 @@ class TradingExecutor:
                 exchange_config = resolve_exchange_config(exchange_config, user_id=user_id)
 
             service = StrategyV2BacktestService()
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             candidates, universe_id = service.resolve_candidates(
                 user_id=user_id,
                 manifest=program.manifest,
@@ -350,7 +350,7 @@ class TradingExecutor:
             )
 
             def fetch_frames() -> dict[str, pd.DataFrame]:
-                end = datetime.utcnow()
+                end = datetime.now(timezone.utc)
                 frames, skipped = service.fetch_frames(
                     candidates,
                     frequency,
@@ -424,6 +424,8 @@ class TradingExecutor:
                 position_mode=str(trading_config.get("position_mode") or ""),
             )
             run_id = int(runtime_run.strategy_run_id or 0)
+            last_prices: dict[str, float] = {}
+            self._heartbeat(strategy_id, run_id, primary, last_prices, 0)
             bot_type = str(
                 strategy.get("bot_type") or trading_config.get("bot_type") or ""
             ).strip().lower()
@@ -454,7 +456,6 @@ class TradingExecutor:
             risk_tick = max(0.25, min(5.0, float(trading_config.get("risk_tick_seconds") or 1)))
             next_signal_poll = 0.0
             consecutive_errors = 0
-            last_prices: dict[str, float] = {}
             strategy_name = str(strategy.get("strategy_name") or f"strategy_{strategy_id}")
             notification_config = _json_object(strategy.get("notification_config"))
             leverage = max(1.0, float(trading_config.get("leverage") or strategy.get("leverage") or 1))
@@ -521,7 +522,14 @@ class TradingExecutor:
                             )
                         next_signal_poll = cycle_started + signal_poll
                     state_store.save(session.protection_snapshot())
-                    self._heartbeat(strategy_id, run_id, primary, last_prices, pending_count)
+                    self._heartbeat(
+                        strategy_id,
+                        run_id,
+                        primary,
+                        last_prices,
+                        pending_count,
+                        loop_latency_ms=int((time.monotonic() - cycle_started) * 1000),
+                    )
                     consecutive_errors = 0
                 except Exception as exc:
                     consecutive_errors += 1
@@ -533,6 +541,7 @@ class TradingExecutor:
                         primary,
                         last_prices,
                         0,
+                        loop_latency_ms=int((time.monotonic() - cycle_started) * 1000),
                         status="degraded",
                         last_error=str(exc),
                     )
@@ -791,19 +800,23 @@ class TradingExecutor:
         if not ok:
             raise RuntimeError(f"grid.startupFailed:{message}")
         tick_seconds = max(0.25, min(5.0, float(trading_config.get("risk_tick_seconds") or 1)))
+        last_prices: dict[str, float] = {}
         try:
             while self._is_strategy_running(strategy_id, current_thread):
+                cycle_started = time.monotonic()
                 prices = self._live_prices(candidates)
                 current_price = float(prices.get(key) or 0)
                 if current_price > 0:
+                    last_prices[key] = current_price
                     runner.tick(current_price, high=current_price, low=current_price, bars_df=frame)
-                    self._heartbeat(
-                        strategy_id,
-                        strategy_run_id,
-                        primary,
-                        {key: current_price},
-                        0,
-                    )
+                self._heartbeat(
+                    strategy_id,
+                    strategy_run_id,
+                    primary,
+                    last_prices,
+                    0,
+                    loop_latency_ms=int((time.monotonic() - cycle_started) * 1000),
+                )
                 if runner.should_stop:
                     break
                 time.sleep(tick_seconds)
@@ -1361,6 +1374,7 @@ class TradingExecutor:
         prices: dict[str, float],
         pending_count: int,
         *,
+        loop_latency_ms: int = 0,
         status: str = "healthy",
         last_error: str = "",
     ) -> None:
@@ -1370,6 +1384,7 @@ class TradingExecutor:
             symbol=str(primary.get("symbol") or ""),
             price=float(prices.get(str(primary.get("key") or ""), 0)),
             pending_signal_count=pending_count,
+            loop_latency_ms=loop_latency_ms,
             status=status,
             last_error=last_error,
         )

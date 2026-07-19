@@ -17,6 +17,7 @@ from app.services.ai_generation_contracts import (
     SCRIPT_STRATEGY_SYSTEM_PROMPT,
 )
 from app.services.strategy import redact_strategy_row
+from app.services.strategy_runtime.health import load_runtime_health
 from app.services.strategy_v2 import compile_strategy_v2
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
@@ -50,11 +51,24 @@ def _strategy(strategy_id: int):
     return get_strategy_service().get_strategy(int(strategy_id), user_id=int(g.user_id))
 
 
+def _attach_runtime_health(rows):
+    items = [dict(row) for row in (rows or [])]
+    statuses = {
+        int(row.get("id") or 0): str(row.get("status") or "")
+        for row in items
+        if int(row.get("id") or 0) > 0
+    }
+    health = load_runtime_health(statuses, strategy_statuses=statuses)
+    for row in items:
+        row["runtime_health"] = health.get(int(row.get("id") or 0), {})
+    return items
+
+
 @strategy_blp.route("/strategies", methods=["GET"])
 @login_required
 def list_strategies():
     rows = get_strategy_service().list_strategies(user_id=int(g.user_id))
-    return _ok([redact_strategy_row(row) for row in rows])
+    return _ok([redact_strategy_row(row) for row in _attach_runtime_health(rows)])
 
 
 @strategy_blp.route("/strategies/<int:strategy_id>", methods=["GET"])
@@ -63,7 +77,7 @@ def get_strategy(strategy_id: int):
     row = _strategy(strategy_id)
     if not row:
         return _error("strategyV2.strategyNotFound", 404)
-    return _ok(redact_strategy_row(row))
+    return _ok(redact_strategy_row(_attach_runtime_health([row])[0]))
 
 
 @strategy_blp.route("/strategies", methods=["POST"])
