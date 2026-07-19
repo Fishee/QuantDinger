@@ -19,6 +19,16 @@ def normalize_live_order_status(status: str) -> str:
     return "unknown"
 
 
+def is_final_fill(requested: float, filled: float, avg_price: float, status: Any = "") -> bool:
+    requested_qty = max(0.0, float(requested or 0.0))
+    filled_qty = max(0.0, float(filled or 0.0))
+    if requested_qty <= 0 or filled_qty <= 0 or float(avg_price or 0.0) <= 0:
+        return False
+    if normalize_live_order_status(status) == "filled":
+        return True
+    return filled_qty >= requested_qty * 0.999999
+
+
 def tracked_fill_baseline(
     row: Dict[str, Any],
     *,

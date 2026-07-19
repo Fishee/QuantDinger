@@ -75,7 +75,7 @@ from app.services.pending_orders.position_sync_cache import (
 )
 from app.services.pending_order_position_sync import PendingOrderPositionSyncMixin
 from app.services.pending_orders.sent_order_recovery import (
-    normalize_live_order_status,
+    is_final_fill, normalize_live_order_status,
     tracked_fill_baseline,
 )
 from app.services.live_trading.binance import BinanceFuturesClient
@@ -108,22 +108,6 @@ AlpacaClient = None
 logger = get_logger(__name__)
 
 ALPACA_FILL_DELTA_EPSILON = 1e-8
-
-
-def _is_final_fill(
-    *,
-    requested: float,
-    filled: float,
-    avg_price: float,
-    status: Any = "",
-) -> bool:
-    requested_qty = max(0.0, float(requested or 0.0))
-    filled_qty = max(0.0, float(filled or 0.0))
-    if requested_qty <= 0 or filled_qty <= 0 or float(avg_price or 0.0) <= 0:
-        return False
-    if normalize_live_order_status(status) == "filled":
-        return True
-    return filled_qty >= requested_qty * 0.999999
 
 
 def _broker_order_type(payload: Dict[str, Any], ref_price: float) -> Tuple[str, float]:
@@ -2190,12 +2174,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 filled=filled,
                 avg_price=avg_price,
                 executed_at=executed_at if filled > 0 else None,
-                final_filled=_is_final_fill(
-                    requested=amount,
-                    filled=filled,
-                    avg_price=avg_price,
-                    status=execution_result.status,
-                ),
+                final_filled=is_final_fill(amount, filled, avg_price, execution_result.status),
             )
             _console_print(f"[worker] order sent: strategy_id={strategy_id} pending_id={order_id} exchange={res.exchange_id} order_id={res.exchange_order_id} filled={filled} avg={avg_price}")
         except Exception as e:
@@ -2392,12 +2371,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 filled=filled,
                 avg_price=avg_price,
                 executed_at=executed_at if filled > 0 else None,
-                final_filled=_is_final_fill(
-                    requested=amount,
-                    filled=filled,
-                    avg_price=avg_price,
-                    status=result.status,
-                ),
+                final_filled=is_final_fill(amount, filled, avg_price, result.status),
             )
             _console_print(f"[worker] IBKR order sent: strategy_id={strategy_id} pending_id={order_id} order_id={exchange_order_id} filled={filled} avg={avg_price}")
 
@@ -2575,12 +2549,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 filled=filled,
                 avg_price=avg_price,
                 executed_at=executed_at if filled > 0 else None,
-                final_filled=_is_final_fill(
-                    requested=amount,
-                    filled=filled,
-                    avg_price=avg_price,
-                    status=result.status,
-                ),
+                final_filled=is_final_fill(amount, filled, avg_price, result.status),
             )
             _console_print(
                 f"[worker] Alpaca order sent: strategy_id={strategy_id} pending_id={order_id} "
