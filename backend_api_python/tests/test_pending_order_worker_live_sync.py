@@ -141,6 +141,33 @@ def test_live_sent_sync_keeps_terminal_fill_open_when_average_price_is_missing(m
     assert snapshots[0]["exchange_status"] == "fill_price_missing"
 
 
+def test_exchange_filled_status_accepts_quantity_precision_remainder():
+    assert worker_module._is_final_fill(
+        requested=0.1617456789,
+        filled=0.161745,
+        avg_price=58_705.0,
+        status="FILLED",
+    ) is True
+
+
+def test_non_terminal_partial_fill_remains_open():
+    assert worker_module._is_final_fill(
+        requested=1.0,
+        filled=0.75,
+        avg_price=58_705.0,
+        status="PARTIALLY_FILLED",
+    ) is False
+
+
+def test_terminal_fill_without_average_price_remains_open():
+    assert worker_module._is_final_fill(
+        requested=1.0,
+        filled=1.0,
+        avg_price=0.0,
+        status="FILLED",
+    ) is False
+
+
 def test_ibkr_submission_never_fabricates_a_fill_from_requested_amount(monkeypatch):
     class Result:
         success = True
