@@ -123,6 +123,67 @@ def handle_data(context, data):
     assert manifest.primary_frequency == "1h"
 
 
+def test_manifest_declares_direction_capability_from_metadata():
+    code = """
+def initialize(context):
+    context.set_universe(["Crypto:BTC/USDT@okx:swap"])
+    context.subscribe(frequency="1h")
+    context.set_metadata(direction_mode="both")
+
+def handle_data(context, data):
+    pass
+"""
+    manifest = compile_strategy_v2(code).manifest
+
+    assert manifest.direction_mode == "both"
+    assert manifest.metadata()["directionMode"] == "both"
+
+
+@pytest.mark.parametrize(
+    "strategy_body,expected",
+    [
+        ("DIRECTION = 1.0", "long_only"),
+        ("DIRECTION = -1.0", "short_only"),
+        (
+            '''
+def trade():
+    order_target_value("Crypto:BTC/USDT@okx:swap", 10, position_side="long")
+    order_target_value("Crypto:BTC/USDT@okx:swap", -10, position_side="short")
+''',
+            "both",
+        ),
+    ],
+)
+def test_manifest_infers_legacy_direction_capability(strategy_body, expected):
+    code = f"""
+{strategy_body}
+
+def initialize(context):
+    context.set_universe(["Crypto:BTC/USDT@okx:swap"])
+    context.subscribe(frequency="1h")
+
+def handle_data(context, data):
+    pass
+"""
+
+    assert compile_strategy_v2(code).manifest.direction_mode == expected
+
+
+def test_manifest_rejects_invalid_direction_capability():
+    code = """
+def initialize(context):
+    context.set_universe(["Crypto:BTC/USDT@okx:swap"])
+    context.subscribe(frequency="1h")
+    context.set_metadata(direction_mode="sideways")
+
+def handle_data(context, data):
+    pass
+"""
+
+    with pytest.raises(StrategyV2ContractError, match="strategyV2.directionModeInvalid"):
+        compile_strategy_v2(code)
+
+
 def test_manifest_allows_exchange_agnostic_crypto_swap_leverage():
     code = """
 def initialize(context):

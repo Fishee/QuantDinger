@@ -54,6 +54,7 @@ def _build_neutral_grid_v2_source(
 def initialize(context):
     context.set_universe([INSTRUMENT])
     context.subscribe(frequency=TIMEFRAME)
+    context.set_metadata(direction_mode="neutral")
     context.set_warmup(2)
     context.allow_leverage(max_leverage=100)
     g.anchor_price = 0.0
@@ -265,6 +266,7 @@ def build_robot_v2_source(
         "\ndef initialize(context):\n"
         "    context.set_universe([INSTRUMENT])\n"
         "    context.subscribe(frequency=TIMEFRAME)\n"
+        f"    context.set_metadata(direction_mode={'short_only' if direction < 0 else 'long_only'!r})\n"
         "    context.set_warmup(2)\n"
         f"{leverage_line}"
         "    g.next_level = 0\n"

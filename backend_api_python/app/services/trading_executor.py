@@ -105,7 +105,7 @@ class TradingExecutor:
         from app.services.strategy_live_guard import (
             find_live_strategy_conflict,
             live_conflict_message,
-            resolve_strategy_position_side,
+            resolve_strategy_direction_mode,
         )
 
         trading_config = _json_object(strategy.get("trading_config"))
@@ -122,7 +122,7 @@ class TradingExecutor:
                 raise RuntimeError(live_conflict_message(conflict))
             return
 
-        position_side = resolve_strategy_position_side(strategy)
+        direction_mode = resolve_strategy_direction_mode(strategy)
         bot_type = str(trading_config.get("bot_type") or "").strip().lower()
         bot_params = (
             trading_config.get("bot_params")
@@ -133,8 +133,8 @@ class TradingExecutor:
             bot_params.get("gridDirection") or bot_params.get("grid_direction") or ""
         ).strip().lower()
         neutral_grid = bot_type == "grid" and grid_direction == "neutral"
-        if position_side not in {"long", "short"} and not neutral_grid:
-            raise RuntimeError("strategyV2.positionSideRequired")
+        if not direction_mode:
+            raise RuntimeError("strategyV2.directionModeRequired")
 
         from app.services.exchange_execution import resolve_exchange_config
         from app.services.grid.exchange_requirements import detect_hedge_position_mode
@@ -151,15 +151,16 @@ class TradingExecutor:
             market_type=market_type,
             exchange_config=exchange_config,
         )
-        if neutral_grid and is_hedge is not True:
-            raise RuntimeError(f"strategyV2.neutralGridHedgeModeRequired:{label}")
+        owns_both_legs = direction_mode in {"both", "neutral"} or neutral_grid
+        if owns_both_legs and is_hedge is not True:
+            raise RuntimeError(f"strategyV2.dualDirectionHedgeModeRequired:{label}")
         if is_hedge is not True:
             if is_hedge is None:
                 raise RuntimeError(f"strategyV2.hedgeModeUnknown:{label}")
         conflict = find_live_strategy_conflict(
             strategy,
             user_id,
-            allow_opposite_leg=is_hedge is True and not neutral_grid,
+            allow_opposite_leg=is_hedge is True and not owns_both_legs,
         )
         if conflict:
             raise RuntimeError(live_conflict_message(conflict))
@@ -648,6 +649,10 @@ class TradingExecutor:
     def _execute_signal(self, **values: Any) -> bool:
         strategy_id = int(values["strategy_id"])
         strategy = self._load_strategy(strategy_id) or {}
+        if str(values.get("execution_mode") or "signal").strip().lower() == "live":
+            from app.services.strategy_live_guard import validate_strategy_signal_direction
+
+            validate_strategy_signal_direction(strategy, values.get("signal_type"))
         quantity = float(values.get("script_base_qty") or 0)
         reference_price = float(values.get("current_price") or 0)
         initial_capital = float(values.get("initial_capital") or 0)

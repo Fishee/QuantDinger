@@ -310,6 +310,7 @@ def test_spot_robot_is_forced_to_long_and_cannot_enable_leverage():
     assert payload["trade_direction"] == "long"
     assert payload["leverage_enabled"] is False
     assert program.manifest.leverage_allowed is False
+    assert program.manifest.direction_mode == "long_only"
     assert program.manifest.universe.instruments[0].key == "Crypto:BTC/USDT@spot"
     assert "DIRECTION = 1.0" in payload["code"]
 
@@ -327,6 +328,7 @@ def test_neutral_grid_generates_dual_leg_v2_and_resting_live_config():
     assert payload["trading_config"]["bot_params"]["initialPositionPct"] == 0
     assert 'position_side="long"' in payload["code"]
     assert 'position_side="short"' in payload["code"]
+    assert compile_strategy_v2(payload["code"]).manifest.direction_mode == "neutral"
 
     instrument = "Crypto:BTC/USDT@swap"
     index = pd.date_range("2026-01-01", periods=3, freq="15min")

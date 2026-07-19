@@ -207,8 +207,39 @@ def test_neutral_grid_preflight_requires_confirmed_hedge_mode(monkeypatch):
         lambda *_args, **_kwargs: (False, "okx_net_mode"),
     )
 
-    with pytest.raises(RuntimeError, match="strategyV2.neutralGridHedgeModeRequired"):
+    with pytest.raises(RuntimeError, match="strategyV2.dualDirectionHedgeModeRequired"):
         executor._preflight_live_strategy(20)
+
+
+def test_direction_capability_rejects_incompatible_signal():
+    strategy = _strategy(21, "long")
+
+    strategy_live_guard.validate_strategy_signal_direction(strategy, "open_long")
+    strategy_live_guard.validate_strategy_signal_direction(strategy, "close_long")
+    strategy_live_guard.validate_strategy_signal_direction(strategy, "close_short")
+    with pytest.raises(RuntimeError, match="strategyV2.directionModeViolation:long_only:short"):
+        strategy_live_guard.validate_strategy_signal_direction(strategy, "open_short")
+
+
+def test_dual_direction_strategy_conflicts_with_either_owned_leg(monkeypatch):
+    target = _strategy(30, "neutral")
+    other = _strategy(31, "long")
+    keys = {
+        30: (7, 17, "okx", "swap", "BTC/USDT", "neutral"),
+        31: (7, 17, "okx", "swap", "BTC/USDT", "long"),
+    }
+
+    class _Service:
+        @staticmethod
+        def get_strategy(strategy_id, user_id=None):
+            return other if strategy_id == 31 else None
+
+    monkeypatch.setattr(strategy_live_guard, "strategy_live_lock_key", lambda row, _uid: keys[int(row["id"])])
+    monkeypatch.setattr(strategy_live_guard, "get_strategy_service", lambda: _Service())
+    monkeypatch.setattr(strategy_live_guard, "get_db_connection", lambda: _Db(_Cursor([{"id": 31}])))
+
+    conflict = strategy_live_guard.find_live_strategy_conflict(target, 7)
+    assert conflict["strategy_id"] == 31
 
 
 def test_neutral_grid_preflight_owns_both_legs(monkeypatch):

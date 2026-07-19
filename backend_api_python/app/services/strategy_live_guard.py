@@ -1,7 +1,14 @@
-import ast
 from typing import Any, Dict, Optional, Tuple
 
 from app.routes.strategy_services import get_strategy_service
+from app.services.strategy_direction import (
+    direction_mode_allows,
+    direction_mode_from_manifest,
+    direction_mode_owned_legs,
+    direction_mode_position_side,
+    infer_direction_mode_from_code,
+    normalize_direction_mode,
+)
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
@@ -21,6 +28,11 @@ def normalize_strategy_position_side(value: Any) -> str:
 
 def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
     """Resolve the position leg or dual-leg ownership of a live strategy."""
+    return direction_mode_position_side(resolve_strategy_direction_mode(strategy))
+
+
+def resolve_strategy_direction_mode(strategy: Dict[str, Any]) -> str:
+    """Resolve the declared trading-direction capability of a live strategy."""
     trading_config = strategy.get("trading_config") if isinstance(strategy.get("trading_config"), dict) else {}
     market_type = str(
         trading_config.get("market_type")
@@ -28,7 +40,7 @@ def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
         or "swap"
     ).strip().lower()
     if market_type == "spot":
-        return "long"
+        return "long_only"
 
     executor_config = trading_config.get("executor_config") if isinstance(trading_config.get("executor_config"), dict) else {}
     manifest = trading_config.get("strategy_manifest") if isinstance(trading_config.get("strategy_manifest"), dict) else {}
@@ -43,6 +55,9 @@ def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
     bot_params = trading_config.get("bot_params") if isinstance(trading_config.get("bot_params"), dict) else {}
 
     candidates = (
+        strategy.get("direction_mode"),
+        trading_config.get("direction_mode"),
+        direction_mode_from_manifest(manifest),
         strategy.get("position_side"),
         strategy.get("trade_direction"),
         trading_config.get("position_side"),
@@ -58,9 +73,9 @@ def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
         metadata_fields.get("side"),
     )
     for value in candidates:
-        side = normalize_strategy_position_side(value)
-        if side:
-            return side
+        mode = normalize_direction_mode(value)
+        if mode:
+            return mode
 
     source_id = int(trading_config.get("script_source_id") or 0)
     if source_id <= 0:
@@ -73,24 +88,23 @@ def resolve_strategy_position_side(strategy: Dict[str, Any]) -> str:
             user_id=int(strategy.get("user_id") or 0),
         )
         code = str((source or {}).get("code") or "")
-        tree = ast.parse(code)
-        for node in tree.body:
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if not any(isinstance(target, ast.Name) and target.id == "DIRECTION" for target in targets):
-                continue
-            value_node = node.value
-            try:
-                value = ast.literal_eval(value_node)
-            except Exception:
-                continue
-            side = normalize_strategy_position_side(value)
-            if side:
-                return side
+        mode = infer_direction_mode_from_code(code)
+        if mode:
+            return mode
     except Exception as exc:
-        logger.debug("strategy position side discovery failed for %s: %s", strategy.get("id"), exc)
+        logger.debug("strategy direction discovery failed for %s: %s", strategy.get("id"), exc)
     return ""
+
+
+def validate_strategy_signal_direction(strategy: Dict[str, Any], signal_type: Any) -> None:
+    """Reject a signal that exceeds the strategy's declared capability."""
+    signal = str(signal_type or "").strip().lower()
+    if signal.startswith(("close_", "reduce_")):
+        return
+    side = "short" if "short" in signal else ("long" if "long" in signal else "")
+    mode = resolve_strategy_direction_mode(strategy)
+    if mode and side and not direction_mode_allows(mode, side):
+        raise RuntimeError(f"strategyV2.directionModeViolation:{mode}:{side}")
 
 
 def strategy_live_lock_key(strategy: Dict[str, Any], user_id: int) -> Optional[Tuple[Any, ...]]:
@@ -163,6 +177,7 @@ def find_live_strategy_conflict(
         return None
 
     strategy_id = int(strategy.get("id") or 0)
+    requested_mode = resolve_strategy_direction_mode(strategy)
     with get_db_connection() as db:
         cur = db.cursor()
         cur.execute(
@@ -185,12 +200,13 @@ def find_live_strategy_conflict(
         other_key = strategy_live_lock_key(other, user_id)
         if not other_key or other_key[:-1] != key[:-1]:
             continue
-        requested_side = str(key[-1] or "unknown")
-        other_side = str(other_key[-1] or "unknown")
+        other_mode = resolve_strategy_direction_mode(other)
         if (
             not allow_opposite_leg
-            or requested_side == other_side
-            or "unknown" in {requested_side, other_side}
+            or bool(
+                direction_mode_owned_legs(requested_mode)
+                & direction_mode_owned_legs(other_mode)
+            )
         ):
             return {
                 "strategy_id": other_id,
@@ -198,7 +214,7 @@ def find_live_strategy_conflict(
                 "symbol": key[-2],
                 "market_type": key[-3],
                 "exchange_id": key[-4],
-                "position_side": requested_side,
+                "position_side": str(key[-1] or "unknown"),
             }
     return None
 
