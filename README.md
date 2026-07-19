@@ -601,6 +601,13 @@ arising from use or misuse of the software.
 - [Report bugs or request features](https://github.com/brokermr810/QuantDinger/issues)
 - Email: [support@quantdinger.com](mailto:support@quantdinger.com)
 
+## Sponsors
+
+We sincerely thank the following sponsor for supporting QuantDinger's continued
+development and open-source community:
+
+- [AtlasCloud](https://www.atlascloud.ai/)
+
 ## Support the project
 
 If QuantDinger is useful to you, a GitHub star, contribution, or donation helps
@@ -614,10 +621,6 @@ Crypto donation address:
 
 Crypto transfers are irreversible. Confirm the address and intended network with
 the project maintainers before sending funds.
-
-## Star history
-
-[![Star History Chart](https://api.star-history.com/svg?repos=brokermr810/QuantDinger&type=Date)](https://star-history.com/#brokermr810/QuantDinger&Date)
 
 ## Acknowledgements
 
