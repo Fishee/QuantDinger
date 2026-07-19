@@ -1544,7 +1544,7 @@ class CommunityService:
                 }
         except Exception as e:
             logger.error(f"get_author_published failed: {e}")
-            return {'items': [], 'total': 0, 'page': 1, 'page_size': page_size, 'total_pages': 0}
+            raise
 
     def get_author_sales(
         self,

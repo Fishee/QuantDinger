@@ -174,6 +174,7 @@ class StrategyService:
             "leverage": existing.get("leverage"),
             "leverageEnabled": float(existing.get("leverage") or 1) > 1,
             "params": (existing.get("trading_config") or {}).get("params") or {},
+            "directionMode": (existing.get("trading_config") or {}).get("direction_mode") or "",
             "positionSide": (existing.get("trading_config") or {}).get("position_side") or "",
             "accountRisk": (existing.get("trading_config") or {}).get("account_risk") or {},
         }
@@ -277,7 +278,7 @@ class StrategyService:
         allowed = {
             "sourceId", "name", "initialCapital", "executionMode", "credentialId",
             "leverageEnabled", "leverage", "params", "notificationChannels",
-            "notificationTargets", "positionSide",
+            "notificationTargets", "directionMode", "positionSide",
             "accountRisk",
         }
         unsupported = set(payload) - allowed - {"user_id"}

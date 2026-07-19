@@ -709,6 +709,21 @@ CREATE TABLE IF NOT EXISTS qd_indicator_codes (
 
 );
 
+-- Upgrade existing installations created before marketplace asset metadata was
+-- added. CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS vip_free boolean DEFAULT false;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS review_status varchar(20) DEFAULT 'approved';
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS review_note text DEFAULT '';
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS reviewed_at timestamp NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS reviewed_by int4 NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS asset_type varchar(32) DEFAULT 'indicator';
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_indicator_id int4 NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_script_source_id int4 NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_strategy_id int4 NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_language varchar(16) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS name_i18n jsonb DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS description_i18n jsonb DEFAULT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_user_id ON qd_indicator_codes USING btree (user_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_review_status ON qd_indicator_codes USING btree (review_status);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source ON qd_indicator_codes USING btree (source_indicator_id);
