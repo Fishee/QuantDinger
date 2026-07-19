@@ -6,6 +6,10 @@ import json
 from typing import Any
 
 from app.services.script_source import get_script_source_service
+from app.services.strategy_direction import (
+    direction_mode_position_side,
+    normalize_direction_mode,
+)
 from app.utils.db import get_db_connection
 
 from .contract import StrategyV2ContractError, compile_strategy_v2
@@ -44,13 +48,25 @@ class StrategyV2DeploymentService:
         if leverage_enabled and leverage > manifest.max_leverage:
             raise StrategyV2ContractError("strategyV2.leverageExceedsStrategyLimit")
         leverage = max(1.0, leverage if leverage_enabled else 1.0)
-        position_side = str(
-            payload.get("positionSide")
-            or payload.get("position_side")
-            or ""
-        ).strip().lower()
-        if position_side not in {"", "long", "short", "neutral"}:
-            raise StrategyV2ContractError("strategyV2.positionSideInvalid")
+        declared_payload_direction = payload.get("directionMode") or payload.get("direction_mode") or ""
+        requested_direction = declared_payload_direction or (
+            payload.get("positionSide") or payload.get("position_side") or ""
+        )
+        requested_direction_mode = normalize_direction_mode(requested_direction)
+        if str(requested_direction or "").strip() and not requested_direction_mode:
+            raise StrategyV2ContractError("strategyV2.directionModeInvalid")
+        if (
+            manifest.direction_mode
+            and str(declared_payload_direction or "").strip()
+            and requested_direction_mode
+            and requested_direction_mode != manifest.direction_mode
+        ):
+            raise StrategyV2ContractError("strategyV2.directionModeMismatch")
+        direction_mode = manifest.direction_mode or requested_direction_mode
+        manifest_market_type = self._manifest_market_type(manifest.metadata())
+        if execution_mode == "live" and manifest_market_type == "swap" and not direction_mode:
+            raise StrategyV2ContractError("strategyV2.directionModeRequired")
+        position_side = direction_mode_position_side(direction_mode)
         account_risk = payload.get("accountRisk") or payload.get("account_risk") or {}
         if not isinstance(account_risk, dict):
             raise StrategyV2ContractError("strategyV2.accountRiskInvalid")
@@ -90,6 +106,7 @@ class StrategyV2DeploymentService:
             "params": dict(payload.get("params") or {}),
             "credential_id": credential_id or None,
             "exchange_id": exchange_id,
+            "direction_mode": direction_mode,
             "position_side": position_side,
             "account_risk": dict(account_risk),
         })
@@ -108,7 +125,7 @@ class StrategyV2DeploymentService:
                 manifest.primary_frequency,
                 initial_capital,
                 int(leverage),
-                self._manifest_market_type(manifest.metadata()),
+                manifest_market_type,
                 json.dumps(exchange_config, ensure_ascii=False),
                 json.dumps(runtime_config, ensure_ascii=False),
             )

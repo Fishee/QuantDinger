@@ -92,6 +92,7 @@ class StrategyManifest:
     warmup_bars: int = 0
     leverage_allowed: bool = False
     max_leverage: float = 1.0
+    direction_mode: str = ""
     metadata_fields: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -128,5 +129,6 @@ class StrategyManifest:
             "warmupBars": self.warmup_bars,
             "leverageAllowed": self.leverage_allowed,
             "maxLeverage": self.max_leverage,
+            "directionMode": self.direction_mode,
             "metadata": dict(self.metadata_fields),
         }

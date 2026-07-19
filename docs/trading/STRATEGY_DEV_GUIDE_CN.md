@@ -468,6 +468,18 @@ def initialize(context):
 - 用户选择的杠杆由运行时应用，不要再在订单金额中手工乘一次。
 - 做空只应出现在 swap 策略中，并且必须有独立的空头入场、空头离场和风险规则。
 
+### 交易方向能力
+
+新的 Crypto swap 策略应在 `initialize` 中声明方向能力：
+
+~~~python
+context.set_metadata(direction_mode="both")
+~~~
+
+支持 `long_only`（仅做多）、`short_only`（仅做空）、`both`（多空双向）和 `neutral`（中性双腿）。这个声明不会下单，也不会覆盖策略信号；它用于在部署时分配正确的双向持仓腿，并拒绝超出声明能力的新开仓信号。`both` 和 `neutral` 在实盘中要求交易所账户开启双向持仓模式。
+
+编译器仍会兼容识别旧策略顶层的 `DIRECTION = 1/-1` 常量，以及订单中的字面量 `position_side="long"/"short"`。如果无法安全推断旧版合约策略，部署页面才会要求选择兼容模式。现货策略会自动视为 `long_only`。
+
 ---
 
 ## 15. 完整 CTA 教程：双 EMA 趋势策略

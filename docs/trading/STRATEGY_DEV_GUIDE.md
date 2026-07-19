@@ -466,6 +466,18 @@ Rules:
 - The runtime applies the selected leverage; do not multiply order sizing by leverage again.
 - Shorting belongs only in swap strategies and requires independent short-entry, short-exit, and risk rules.
 
+### Trading-direction capability
+
+New Crypto swap strategies should declare their capability in `initialize`:
+
+~~~python
+context.set_metadata(direction_mode="both")
+~~~
+
+Supported values are `long_only`, `short_only`, `both`, and `neutral`. This declaration does not place orders or override strategy signals. It lets deployment validation reserve the correct hedge-mode leg or legs and reject new entry signals that exceed the declared capability. `both` and `neutral` require hedge mode for live execution.
+
+The compiler still recognizes legacy top-level `DIRECTION = 1/-1` constants and literal `position_side="long"/"short"` order arguments. If a legacy swap strategy cannot be inferred safely, the deployment form asks for a compatibility mode. Spot strategies are treated as `long_only` automatically.
+
 ---
 
 ## 15. Complete CTA tutorial: dual EMA trend

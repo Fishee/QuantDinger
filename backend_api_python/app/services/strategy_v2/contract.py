@@ -10,6 +10,11 @@ from typing import Any, Callable, Iterable
 
 from app.utils.safe_exec import build_safe_builtins, safe_exec_with_validation
 from app.services.factors import FactorError, get_factor
+from app.services.strategy_direction import (
+    direction_mode_from_manifest,
+    infer_direction_mode_from_code,
+    normalize_direction_mode,
+)
 
 from .instruments import (
     is_index_reference,
@@ -229,6 +234,23 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
         or len(context.instruments) > 1
         or "on_rebalance" in handlers
     ) else "cta"
+    metadata_manifest = {"metadata": dict(context.metadata)}
+    declared_direction_mode = direction_mode_from_manifest(metadata_manifest)
+    direction_keys = {
+        "direction_mode",
+        "directionMode",
+        "trade_direction",
+        "position_side",
+        "side",
+    }
+    if any(key in context.metadata for key in direction_keys) and not declared_direction_mode:
+        raise StrategyV2ContractError("strategyV2.directionModeInvalid")
+    direction_mode = declared_direction_mode or infer_direction_mode_from_code(raw)
+    if not direction_mode and context.instruments and all(
+        item.market_type != "swap" for item in context.instruments
+    ):
+        direction_mode = "long_only"
+    direction_mode = normalize_direction_mode(direction_mode)
     manifest = StrategyManifest(
         api_version=2,
         code_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
@@ -247,6 +269,7 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
         warmup_bars=context.warmup_bars,
         leverage_allowed=context.leverage_allowed,
         max_leverage=context.max_leverage,
+        direction_mode=direction_mode,
         metadata_fields=dict(context.metadata),
     )
     return CompiledStrategyV2(raw, namespace, state, manifest)
