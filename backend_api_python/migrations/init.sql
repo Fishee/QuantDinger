@@ -449,6 +449,23 @@ CREATE INDEX IF NOT EXISTS idx_trades_created_at ON qd_strategy_trades(created_a
 CREATE INDEX IF NOT EXISTS idx_trades_strategy_symbol_canon ON qd_strategy_trades (strategy_id, market_type, symbol_canonical);
 CREATE INDEX IF NOT EXISTS idx_positions_strategy_leg ON qd_strategy_positions (strategy_id, market_type, symbol_canonical, side);
 
+-- Five-minute mark-to-market history used to calculate a strategy's true
+-- local-day equity change, including the change in unrealized P&L on positions
+-- carried across midnight.
+CREATE TABLE IF NOT EXISTS qd_strategy_equity_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES qd_users(id) ON DELETE CASCADE,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    equity DECIMAL(24,8) NOT NULL DEFAULT 0,
+    realized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    unrealized_pnl DECIMAL(24,8) NOT NULL DEFAULT 0,
+    captured_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_equity_snapshots_boundary
+ON qd_strategy_equity_snapshots(strategy_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_equity_snapshots_user
+ON qd_strategy_equity_snapshots(user_id, captured_at DESC);
+
 -- Strategy AI review report history.
 CREATE TABLE IF NOT EXISTS qd_strategy_review_reports (
     id SERIAL PRIMARY KEY,

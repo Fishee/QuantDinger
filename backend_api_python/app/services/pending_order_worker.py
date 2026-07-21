@@ -1759,7 +1759,8 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                 append_strategy_log(strategy_id, "error", "Order rejected because account risk could not be verified")
                 return
 
-        # Close/reduce: cap to DB size; if DB empty, fall back to live exchange position.
+        # Close/reduce: the strategy ledger is the ownership boundary.  The
+        # exchange position/balance may only reduce the requested quantity.
         if reduce_only:
             try:
                 amount, close_meta = resolve_reduce_only_quantity(
@@ -1770,6 +1771,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     client=client,
                     market_type=str(market_type or "swap"),
                     exchange_config=exchange_config,
+                    allow_exchange_fallback=False,
                 )
                 if close_meta:
                     phases["close_size_resolve"] = close_meta
@@ -1873,7 +1875,9 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
         use_limit_first = order_mode in ("maker", "limit", "limit_first", "maker_then_market")
 
         remaining = float(amount or 0.0)
-        # Close/reduce: DB may lag right after open or trailing; re-sync + re-query exchange once.
+        # Close/reduce: retry the strategy-ledger lookup once after a sync.  A
+        # missing strategy position still resolves to zero; account inventory
+        # is never adopted as strategy-owned quantity.
         if (
             remaining <= 0
             and reduce_only
@@ -1896,6 +1900,7 @@ class PendingOrderWorker(PendingOrderPositionSyncMixin):
                     client=client,
                     market_type=str(market_type or "swap"),
                     exchange_config=exchange_config,
+                    allow_exchange_fallback=False,
                 )
                 if retry_meta:
                     phases["close_size_retry"].update(retry_meta)
