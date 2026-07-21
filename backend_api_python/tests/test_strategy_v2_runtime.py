@@ -648,3 +648,33 @@ def handle_data(context, data):
     assert {item["status"] for item in result["rawTrades"]} == {"filled"}
     assert result["attribution"]["orderStatus"]["partial"] == 0
     assert result["attribution"]["orderStatus"]["rejected"] == 0
+
+
+def test_closed_trade_breaks_out_open_and_close_commission():
+    frame = _frame([100, 100, 110, 110, 110])
+    code = """
+def initialize(context):
+    g.symbol = "Crypto:BTC/USDT@swap"
+    g.step = 0
+    context.set_universe([g.symbol])
+    context.subscribe(frequency="1m")
+
+def handle_data(context, data):
+    if g.step == 0:
+        order_target_value(g.symbol, 1000, reason="entry")
+    elif g.step == 1:
+        order_target_value(g.symbol, 0, reason="exit")
+    g.step += 1
+"""
+    result = StrategyV2BacktestRunner(
+        code=code, frames={"Crypto:BTC/USDT@swap": frame}, initial_capital=10_000,
+        commission=0.001, slippage=0,
+    ).run()
+
+    trade = result["closedTrades"][0]
+    assert trade["entry_commission"] > 0
+    assert trade["exit_commission"] > 0
+    assert trade["commission"] == pytest.approx(
+        trade["entry_commission"] + trade["exit_commission"]
+    )
+    assert trade["profit"] == pytest.approx(trade["gross_profit"] - trade["commission"])
