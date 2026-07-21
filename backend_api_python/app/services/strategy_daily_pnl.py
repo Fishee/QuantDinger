@@ -187,6 +187,16 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
                 FROM qd_strategy_trades
                 WHERE strategy_id IN ({placeholders})
                 GROUP BY strategy_id
+            ), funding_totals AS (
+                SELECT strategy_id, SUM(COALESCE(amount, 0)) AS funding_payment
+                FROM qd_strategy_funding_fees
+                WHERE strategy_id IN ({placeholders})
+                GROUP BY strategy_id
+            ), broker_activity_totals AS (
+                SELECT strategy_id, SUM(COALESCE(amount, 0)) AS broker_activity_payment
+                FROM qd_strategy_broker_activities
+                WHERE strategy_id IN ({placeholders})
+                GROUP BY strategy_id
             ), position_totals AS (
                 SELECT strategy_id,
                        SUM(COALESCE(unrealized_pnl, 0)) AS unrealized,
@@ -198,14 +208,18 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
             SELECT s.id AS strategy_id, s.user_id, s.created_at, s.status,
                    COALESCE(s.initial_capital, 0) AS initial_capital,
                    COALESCE(t.realized_net, 0) AS realized_net,
+                   COALESCE(f.funding_payment, 0) AS funding_payment,
+                   COALESCE(b.broker_activity_payment, 0) AS broker_activity_payment,
                    COALESCE(p.unrealized, 0) AS unrealized,
                    COALESCE(p.open_positions, 0) AS open_positions
             FROM qd_strategies_trading s
             LEFT JOIN trade_totals t ON t.strategy_id = s.id
+            LEFT JOIN funding_totals f ON f.strategy_id = s.id
+            LEFT JOIN broker_activity_totals b ON b.strategy_id = s.id
             LEFT JOIN position_totals p ON p.strategy_id = s.id
             WHERE s.id IN ({placeholders}){user_filter}
             """,
-            tuple(ids + ids + params),
+            tuple(ids + ids + ids + ids + params),
         )
         rows = cur.fetchall() or []
         cur.close()
@@ -215,13 +229,17 @@ def _load_current_equity(strategy_ids: Iterable[int], user_id: int | None = None
         strategy_id = int(row.get("strategy_id") or 0)
         initial = float(row.get("initial_capital") or 0.0)
         realized = float(row.get("realized_net") or 0.0)
+        funding_payment = float(row.get("funding_payment") or 0.0)
+        broker_activity_payment = float(row.get("broker_activity_payment") or 0.0)
         unrealized = float(row.get("unrealized") or 0.0)
         output[strategy_id] = {
             **row,
             "initial_capital": initial,
-            "realized_net": realized,
+            "realized_net": realized + funding_payment + broker_activity_payment,
+            "funding_payment": funding_payment,
+            "broker_activity_payment": broker_activity_payment,
             "unrealized": unrealized,
-            "equity": initial + realized + unrealized,
+            "equity": initial + realized + funding_payment + broker_activity_payment + unrealized,
         }
     return output
 
@@ -311,13 +329,21 @@ def _load_reconstructed_opening(strategy_ids: list[int], user_id: int, day_start
                        CASE WHEN t.created_at < %s
                             THEN COALESCE(t.profit, 0) - COALESCE(t.commission_quote, t.commission, 0)
                             ELSE 0 END
+                   ), 0) + COALESCE((
+                       SELECT SUM(COALESCE(f.amount, 0))
+                       FROM qd_strategy_funding_fees f
+                       WHERE f.strategy_id = s.id AND f.occurred_at < %s
+                   ), 0) + COALESCE((
+                       SELECT SUM(COALESCE(b.amount, 0))
+                       FROM qd_strategy_broker_activities b
+                       WHERE b.strategy_id = s.id AND b.occurred_at < %s
                    ), 0) AS opening_equity
             FROM qd_strategies_trading s
             LEFT JOIN qd_strategy_trades t ON t.strategy_id = s.id
             WHERE s.id IN ({placeholders}) AND s.user_id = %s
             GROUP BY s.id, s.initial_capital
             """,
-            tuple([day_start] + strategy_ids + [int(user_id)]),
+            tuple([day_start, day_start, day_start] + strategy_ids + [int(user_id)]),
         )
         rows = cur.fetchall() or []
         cur.close()

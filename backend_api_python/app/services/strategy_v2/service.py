@@ -272,6 +272,7 @@ class StrategyV2BacktestService:
             "leverage": float(leverage if leverage_enabled else 1.0),
             "commission": float(commission),
             "slippage": float(slippage),
+            "fundingMode": "not_modeled",
         }
 
         run_id = None
