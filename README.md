@@ -817,7 +817,7 @@ rsync -avz --delete \
 --exclude='*.log' \
 --exclude='**/tests' \
 ./ \
-xiang@34.143.227.108:~/quantdinger/
+xiang@34.81.48.227:~/quantdinger/
 ```
 
 
