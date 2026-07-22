@@ -96,3 +96,4 @@ backend_api_python/data/memory/
 # ========================
 docker-compose.override.yml
 /QuantDinger-Mobile/
+/Run.md
